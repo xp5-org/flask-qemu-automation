@@ -126,7 +126,7 @@ def run_buildtests():
     path = os.path.join(build_REPORT_DIR, filename)
 
     def run():
-        test_runner.run_mybuildtests(path)
+        test_runner.run_mybuildtests()
         with open("progress.txt", "w") as pf:
             pf.write("Done")
 
@@ -143,7 +143,7 @@ def run_playtests():
     path = os.path.join(play_REPORT_DIR, filename)
 
     def run():
-        test_runner.run_tests(path)
+        test_runner.run_myplaytests()
         with open("progress.txt", "w") as pf:
             pf.write("Done")
 
