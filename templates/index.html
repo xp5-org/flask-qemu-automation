@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+    <title>Test Runner</title>
+    <style>
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        .green { background-color: #c8f7c5; }
+        .red { background-color: #f7c5c5; }
+        .gray { background-color: #eeeeee; }
+        ul { 
+            list-style-type: none; 
+            padding-left: 0; 
+            margin: 0;               
+            line-height: 1;          
+            font-size: 14px;         
+        }
+        li { 
+            margin: 0; 
+            padding: 0;              
+            line-height: 1;          
+            display: block;          
+        }
+        a {
+            display: inline-block;
+            line-height: 1;
+            padding: 0;
+            margin: 0;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Run Test</h2>
+    <div id="progress-status">Progress: Idle</div>
+    <button id="run-tests-btn">Run Tests</button>
+
+    <br><br>
+
+<h1>Most Recent</h1>
+{% if latest_summary %}
+    <table>
+        <tr><th>Test</th><th>Duration (s)</th><th>Status</th></tr>
+        {% for test, duration, status in latest_summary %}
+            <tr>
+                <td>{{ test }}</td>
+                <td>{{ duration }}</td>
+                <td class="{{ 'green' if status == 'PASS' else ('red' if status == 'FAIL' else 'gray') }}">{{ status }}</td>
+            </tr>
+        {% endfor %}
+    </table>
+{% else %}
+    <p>No reports found.</p>
+{% endif %}
+
+
+    <br><br>
+
+    <h2>Summaries</h2>
+    <table>
+        <tr><th>Report</th><th>Status</th></tr>
+        {% for report, status in summaries %}
+            <tr>
+                <td><a href="{{ url_for('view_report', filename=report) }}">{{ report }}</a></td>
+                <td class="{{ 'green' if status == 'PASS' else ('red' if status == 'FAIL' else 'gray') }}">{{ status }}</td>
+            </tr>
+        {% endfor %}
+    </table>
+
+    <script>
+    let polling = false;
+    let pollTimeout;
+
+    function pollProgress() {
+        fetch("/progress")
+            .then(response => response.text())
+            .then(data => {
+                const status = document.getElementById("progress-status");
+                if (data === "Done") {
+                    status.textContent = "Progress: Complete";
+                    polling = false;
+                    clearTimeout(pollTimeout);
+                    location.reload();
+                } else {
+                    status.textContent = "Progress: " + data;
+                    pollTimeout = setTimeout(pollProgress, 3000);
+                }
+            })
+            .catch(() => {
+                // Try polling again after 3s on error
+                pollTimeout = setTimeout(pollProgress, 3000);
+            });
+    }
+
+    document.getElementById("run-tests-btn").addEventListener("click", function() {
+        if (polling) return; // prevent multiple clicks
+
+        polling = true;
+        document.getElementById("progress-status").textContent = "Progress: Starting...";
+
+        fetch("/run")
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error("Failed to start tests");
+                }
+                // Start polling after run triggered
+                pollProgress();
+            })
+            .catch(err => {
+                polling = false;
+                document.getElementById("progress-status").textContent = "Error starting tests";
+                console.error(err);
+            });
+    });
+    </script>
+
+</body>
+</html>
