@@ -447,13 +447,13 @@ def detach_floppy_from_qemu(sock):
     try:
         sock.settimeout(2.0)
         # Flush small amount of data if available, without blocking
-        try:
-            while True:
-                data = sock.recv(4096)
-                if not data:
-                    break
-        except socket.timeout:
-            pass
+        #try:
+        #    while True:
+        #        data = sock.recv(4096)
+        #        if not data:
+        #            break
+        #except socket.timeout:
+        #    pass
 
         sock.sendall(b"eject floppy0\n")
 
@@ -481,6 +481,7 @@ def start_playtest_qemu():
         "qemu-system-i386",
         "-hda", QEMU_IMAGE,
         "-m", "4M",
+        "-vga", "std",
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
         "-vga", "std"
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

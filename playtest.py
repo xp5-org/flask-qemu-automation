@@ -80,7 +80,7 @@ def test4_screencapture(context):
         return False, "No QEMU monitor socket available"
     stdout_lines = []
     log = []
-    success, output = take_screenshots_to_gif(sock, 1, 30, gif_name="test4.gif")
+    success, output = take_screenshots_to_gif(sock, 1, 5, gif_name="test4.gif")
     time.sleep(1)
     log.append(output)
     return success, "\n".join(log)
@@ -92,6 +92,7 @@ def test5_quittodos(context):
         return False, "No QEMU monitor socket available"
     stdout_lines = []
     log = []
+    send_monitor_string(sock, "qqq\n")
     send_monitor_string(sock, "qqq\n")
     searchphrase = "bad"
     success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10)
