@@ -89,17 +89,13 @@ def run_mybuildtests():
     import buildtest
 
     test_cases = [f.test_description for f in helpers.buildtest_registry]
-
-    # Shared context for QEMU process and monitor socket
     context = {"sock": None, "qemu_process": None}
 
-    # Run all tests passing context
     results = run_tests(test_cases, helpers.buildtest_registry, context)
 
-    # Optionally clean up QEMU if still running (optional)
-    #if context.get("qemu_process"):
-    #    context["qemu_process"].terminate()
-    #    context["qemu_process"].wait(timeout=5)
+    if context.get("qemu_process"):
+        context["qemu_process"].terminate()
+        context["qemu_process"].wait(timeout=5)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     subdir_path = os.path.join(REPORT_DIR, timestamp)
@@ -114,19 +110,14 @@ def run_myplaytests():
     import datetime
     import playtest
     
-    
-    
     test_cases = [f.test_description for f in helpers.playtest_registry]
-    # Shared context for QEMU process and monitor socket
     context = {"sock": None, "qemu_process": None}
 
-    # Run all tests passing context
     results = run_tests(test_cases, helpers.playtest_registry, context)
 
-    # Optionally clean up QEMU if still running (optional)
-    #if context.get("qemu_process"):
-    #    context["qemu_process"].terminate()
-    #    context["qemu_process"].wait(timeout=5)
+    if context.get("qemu_process"):
+        context["qemu_process"].terminate()
+        context["qemu_process"].wait(timeout=5)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     subdir_path = os.path.join(REPORT_DIR, timestamp)
