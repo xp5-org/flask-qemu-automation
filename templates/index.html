@@ -34,7 +34,8 @@
 
     <h2>Run Test</h2>
     <div id="progress-status">Progress: Idle</div>
-    <button id="run-tests-btn">Run Tests</button>
+    <button id="run-buildtests-btn">Run Build</button>
+    <button id="run-playtests-btn">Run Play</button>
 
     <br><br>
 
@@ -57,18 +58,20 @@
 
     <br><br>
 
-    <h2>Summaries</h2>
-    <table>
-        <tr><th>Report</th><th>Status</th></tr>
-        {% for report, status in summaries %}
-            <tr>
-                <td><a href="{{ url_for('view_report', filename=report) }}">{{ report }}</a></td>
-                <td class="{{ 'green' if status == 'PASS' else ('red' if status == 'FAIL' else 'gray') }}">{{ status }}</td>
-            </tr>
-        {% endfor %}
-    </table>
+<h2>Summaries</h2>
+<table>
+    <tr><th>Report</th><th>Duration</th><th>Status</th></tr>
+    {% for report, duration, status in summaries %}
+        <tr>
+            <td><a href="{{ url_for('view_report', filepath=report) }}">{{ report }}</a></td>
+            <td>{{ duration }}</td>
+            <td class="{{ 'green' if status == 'PASS' else ('red' if status == 'FAIL' else 'gray') }}">{{ status }}</td>
+        </tr>
+    {% endfor %}
+</table>
 
-    <script>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
     let polling = false;
     let pollTimeout;
 
@@ -88,32 +91,44 @@
                 }
             })
             .catch(() => {
-                // Try polling again after 3s on error
                 pollTimeout = setTimeout(pollProgress, 3000);
             });
     }
 
-    document.getElementById("run-tests-btn").addEventListener("click", function() {
-        if (polling) return; // prevent multiple clicks
-
+    document.getElementById("run-buildtests-btn").addEventListener("click", function() {
+        if (polling) return;
         polling = true;
-        document.getElementById("progress-status").textContent = "Progress: Starting...";
-
-        fetch("/run")
+        document.getElementById("progress-status").textContent = "Progress: Starting Build Tests...";
+        fetch("/run_build")
             .then(response => {
-                if (!response.ok) {
-                    throw new Error("Failed to start tests");
-                }
-                // Start polling after run triggered
+                if (!response.ok) throw new Error("Failed to start build tests");
                 pollProgress();
             })
             .catch(err => {
                 polling = false;
-                document.getElementById("progress-status").textContent = "Error starting tests";
+                document.getElementById("progress-status").textContent = "Error starting build tests";
                 console.error(err);
             });
     });
-    </script>
+
+    document.getElementById("run-playtests-btn").addEventListener("click", function() {
+        if (polling) return;
+        polling = true;
+        document.getElementById("progress-status").textContent = "Progress: Starting Play Tests...";
+        fetch("/run_play")
+            .then(response => {
+                if (!response.ok) throw new Error("Failed to start play tests");
+                pollProgress();
+            })
+            .catch(err => {
+                polling = false;
+                document.getElementById("progress-status").textContent = "Error starting build tests";
+                console.error(err);
+            });
+    });
+
+        }); // end of DOMContentLoaded
+</script>
 
 </body>
 </html>

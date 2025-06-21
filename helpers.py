@@ -10,7 +10,7 @@ from PIL import Image
 import pytesseract
 import shutil
 
-
+RAW_IMAGE = "hdd.img"
 QEMU_IMAGE = "hdd.qcow2"
 MONITOR_PORT = 55555
 PROGRESS_FILE = "progress.txt"
@@ -27,6 +27,71 @@ def flush_monitor_banner(sock):
         print("[monitor banner] no banner received")
     except Exception as e:
         print(f"[monitor banner error] {e}")
+
+
+def take_screenshots_to_gif(sock, interval, count, gif_name="screencap.gif", base_name="frame"):
+    framerate = 10
+    start_time = time.time()
+    try:
+        temp_dir = os.path.abspath("screens_tmp")
+        os.makedirs(temp_dir, exist_ok=True)
+        frames = []
+
+        for i in range(count):
+            name = f"{base_name}_{i}"
+            ppm_path = os.path.join(temp_dir, name + ".ppm")
+            png_path = os.path.join(temp_dir, name + ".png")
+
+            # Trigger screenshot
+            sock.sendall(f"screendump {ppm_path}\n".encode("utf-8"))
+            time.sleep(0.5)
+
+            # Wait for file
+            wait_start = time.time()
+            while not os.path.exists(ppm_path):
+                if time.time() - wait_start > 5:
+                    raise RuntimeError(f"Timed out waiting for screendump {ppm_path}")
+                time.sleep(0.1)
+
+            # Convert to PNG
+            img = Image.open(ppm_path)
+            img.save(png_path)
+            frames.append(img.convert("RGB"))
+
+            time.sleep(interval)
+
+        # Save to animated GIF in REPORT_DIR
+        gif_path = os.path.abspath(os.path.join(REPORT_DIR, gif_name))
+        frame_duration = max(1, int(1000.0 / framerate))  # ms per frame
+
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=frame_duration,
+            loop=0
+        )
+
+        duration = time.time() - start_time
+        gif_playback_time = count / framerate
+        speedup = duration / gif_playback_time if gif_playback_time > 0 else 0
+
+        info = (f"Captured {len(frames)} screenshots in {duration:.2f} seconds, "
+                f"GIF plays back at {framerate} fps for {gif_playback_time:.2f} seconds, "
+                f"approximate speedup: {speedup:.1f}x")
+
+        return True, info
+
+    except Exception as e:
+        return False, f"Error: {e}"
+
+
+
+
+
+
+
+
 
 def take_screenshot(sock, name="screenshot"):
     name = name.replace(" ", "_")  # replace spaces in filename
@@ -72,6 +137,33 @@ def copy_to_fat_image(src_dir, image_path):
             return False, output
     finally:
         os.unlink(config_path)
+
+
+
+
+def convert_raw_to_qcow2(raw_path=RAW_IMAGE, qcow2_path=QEMU_IMAGE):
+    if not os.path.isfile(raw_path):
+        return False, f"[error] Raw image not found: {raw_path}"
+
+    if qcow2_path is None:
+        qcow2_path = os.path.splitext(raw_path)[0] + ".qcow2"
+
+    try:
+        result = subprocess.run(
+            ["qemu-img", "convert", "-O", "qcow2", raw_path, qcow2_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        output = result.stdout.decode("utf-8", errors="replace")
+        return True, output
+    except subprocess.CalledProcessError as e:
+        output = e.stdout.decode("utf-8", errors="replace") if e.stdout else ''
+        return False, output
+
+    
+
+
 
 def copy_from_fat_image(dst_dir, image_path):
     log = []
@@ -119,18 +211,27 @@ def send_monitor_string(sock, text, delay=0.05):
         'y': 'y', 'z': 'z', '0': '0', '1': '1', '2': '2', '3': '3',
         '4': '4', '5': '5', '6': '6', '7': '7', '8': '8', '9': '9',
         ' ': 'spc', '.': 'dot', ',': 'comma', '-': 'minus',
-        '\\': 'backslash', ':': 'colon', ';': 'semicolon',
-        '\n': 'ret', '\r': 'ret'
+        '/': 'slash', '\\': 'backslash', ':': 'semicolon',
+        ';': 'semicolon', '\n': 'ret', '\r': 'ret',
+        '*': '8'
     }
+
+
+
+    # Characters that require SHIFT to produce correctly
+    shift_required = {
+        ':', '_', '+', '{', '}', '|', '<', '>', '"', '?',
+        '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')'
+    }
+
     for ch in text:
-        if ch.lower() in keymap:
-            key = keymap[ch.lower()]
-            if ch.isupper():
-                send_monitor_key_with_modifiers(sock, key, shift=True)
-            else:
-                send_monitor_key(sock, key)
+        key_char = ch.lower()
+        if key_char in keymap:
+            key = keymap[key_char]
+            shift = ch.isupper() or ch in shift_required
+            send_monitor_key(sock, key, shift=shift, delay=delay)
         else:
-            print(f"Unsupported char: {repr(ch)}")
+            print(f"[unsupported] {repr(ch)}")
 
 sock_lock = threading.Lock()
 def send_and_receive(sock, command):
@@ -187,14 +288,16 @@ def save_snapshot(sock):
         print("[save_snapshot] Snapshot not found in monitor.")
         return False, snapshot_list
 
-def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None, stopy=None):
+def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None, stopy=None, errorphrase=None):
     log_dir = "./compile_logs"
     os.makedirs(log_dir, exist_ok=True)
     log = []
 
     start_time = time.time()
     phrase_lower = phrase.lower()
+    error_lower = errorphrase.lower() if errorphrase else None
     attempts = 0
+
     for i in range(timeout):
         attempts += 1
         iter_start = time.time()
@@ -236,14 +339,17 @@ def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None
         log.append(f"Total time this pass: {iter_total:.2f} seconds\n")
 
         text_lower = text.lower()
+
         if phrase_lower in text_lower:
             return True, text, attempts, log
-        if "error" in text_lower:
+        if error_lower and error_lower in text_lower:
+            log.append(f"Aborted early due to error phrase: '{errorphrase}' found in OCR text.")
             return False, text, attempts, log
 
         time.sleep(2)
 
     return False, text, attempts, log
+
 
 def ppdcompile(sock):
     log_dir = "./compile_logs"
@@ -283,10 +389,94 @@ def load_snapshot(sock, snapshot_name):
 
 
 
+def make_floppy_image(path):
+    size = 1474560  # 1.44 MB
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(b"\x00" * size)
+        return True, "Created new 1.44MB floppy image"
+    else:
+        actual_size = os.path.getsize(path)
+        if actual_size != size:
+            return False, f"Floppy image exists but is {actual_size} bytes, expected 1474560"
+        return True, "Floppy image already exists with correct size"
+
+
+def attach_floppy_to_qemu(flop_img_path, monitor_host="127.0.0.1", monitor_port=MONITOR_PORT):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((monitor_host, monitor_port))
+        sock.settimeout(2.0)
+
+        # Flush initial monitor banner/output
+        time.sleep(0.1)
+        try:
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+        except socket.timeout:
+            pass
+
+        cmd = f'change floppy0 {flop_img_path}\n'
+        sock.sendall(cmd.encode('utf-8'))
+
+        # Optionally read the response
+        response = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        except socket.timeout:
+            pass
+
+        sock.close()
+        return True, response.decode('utf-8', errors='replace')
+    except Exception as e:
+        return False, str(e)
+    
+
+
+
+
+def detach_floppy_from_qemu(sock):
+    #floppy image.img format blocks snap create
+    #need to dismount floppy before snapshot take
+    try:
+        sock.settimeout(2.0)
+        # Flush small amount of data if available, without blocking
+        try:
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+        except socket.timeout:
+            pass
+
+        sock.sendall(b"eject floppy0\n")
+
+        # Optionally read a small response to avoid issues
+        try:
+            resp = sock.recv(4096)
+        except socket.timeout:
+            resp = b""
+
+        return True, resp.decode('utf-8', errors='replace')
+    except Exception as e:
+        return False, str(e)
+
+
+
+
+
+
 
 
 def start_playtest_qemu():
     global qemu_process
+    dummy_floppy = "tmpfloppydisk.img"
     qemu_process = subprocess.Popen([
         "qemu-system-i386",
         "-hda", QEMU_IMAGE,
@@ -295,6 +485,7 @@ def start_playtest_qemu():
         "-vga", "std"
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return qemu_process
+
 
 def start_buildtest_qemu():
     global qemu_process
@@ -302,10 +493,12 @@ def start_buildtest_qemu():
         "qemu-system-i386",
         "-hda", QEMU_IMAGE,
         "-m", "4M",
-        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
-        "-vga", "std"
+        "-monitor", "tcp:127.0.0.1:55555,server,nowait",
+        "-vga", "std",
+        "-fda", "tmpfloppydisk.img"
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return qemu_process
+
 
 
 def wait_for_monitor(timeout=10):

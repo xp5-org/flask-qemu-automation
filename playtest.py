@@ -1,16 +1,108 @@
-from helpers import register_playtest, load_snapshot
+from helpers import register_playtest, load_snapshot, send_monitor_string, take_screenshots_to_gif, take_screenshot, ocr_word_find, start_playtest_qemu, make_floppy_image, attach_floppy_to_qemu
 import time
 
-@register_playtest("Test1 - playtest demo1")
-def test1_playtestdummy(sock):
+
+
+
+
+
+
+
+
+@register_playtest("Test1 - Start QEMU")
+def test3_start_qemu(context):
+    import threading
+    import time
+    import helpers
+
+    log = []
+    try:
+        qemu_process = helpers.start_playtest_qemu()
+
+        # Thread to read stdout continuously and append to log
+        def read_stdout(proc, log_list):
+            for line in iter(proc.stdout.readline, ''):
+                log_list.append(line.rstrip())
+            proc.stdout.close()
+
+        qemu_thread = threading.Thread(target=read_stdout, args=(qemu_process, log))
+        qemu_thread.daemon = True
+        qemu_thread.start()
+
+        # Wait for monitor socket to become available
+        sock = helpers.wait_for_monitor(timeout=30)  # Add timeout if possible
+        if not sock:
+            return False, "Failed to connect to QEMU monitor socket.\n" + "\n".join(log)
+
+        # Extra delay to let QEMU settle
+        time.sleep(1)
+
+        context["sock"] = sock
+        context["qemu_process"] = qemu_process
+        return True, "QEMU started successfully.\n" + "\n".join(log)
+
+    except Exception as e:
+        log.append(f"Exception starting QEMU: {e}")
+        return False, "\n".join(log)
+    
+
+@register_playtest("Test2 - launch from snap1")
+def test2_startvm(context):
+    sock = context.get("sock")
+    if not sock:
+        return False, "No QEMU monitor socket available"
     stdout_lines = []
     log = []
-    print("test1")
-
     # Load the snapshot by name
-    load_snapshot(sock, "snap1")
+    success, output = load_snapshot(sock, "snap1")
+    log.append(output)
+    take_screenshot(sock, "reports/test1")
+    return success, "\n".join(log)
 
-    print("ran the snap load, sleeping for 15")
-    time.sleep(15)
-    # test code here, return (success, log_output)
-    return True, "\n".join(log)
+
+@register_playtest("Test3 - start bartest")
+def test3_startprog(context):
+    sock = context.get("sock")
+    if not sock:
+        return False, "No QEMU monitor socket available"
+    stdout_lines = []
+    log = []
+    send_monitor_string(sock, "cd c:\\src \n")
+    send_monitor_string(sock, "bartest\n")
+    take_screenshot(sock, "reports/test3")
+    return True, "\n".join(log) # assume it started
+
+
+@register_playtest("Test4 - capture screen")
+def test4_screencapture(context):
+    sock = context.get("sock")
+    if not sock:
+        return False, "No QEMU monitor socket available"
+    stdout_lines = []
+    log = []
+    success, output = take_screenshots_to_gif(sock, 1, 30, gif_name="test4.gif")
+    time.sleep(1)
+    log.append(output)
+    return success, "\n".join(log)
+
+@register_playtest("Test5 - quit to dos prompt")
+def test5_quittodos(context):
+    sock = context.get("sock")
+    if not sock:
+        return False, "No QEMU monitor socket available"
+    stdout_lines = []
+    log = []
+    send_monitor_string(sock, "qqq\n")
+    searchphrase = "bad"
+    success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10)
+    time.sleep(1)
+    take_screenshot(sock, "reports/test5")
+    log.append(f"number of ocr attempts: {attempts}")
+    log.append("ocr function log:")
+    log.extend(ocrlog)
+    log.append("OCR text detected:")
+    log.append(ocr_text)
+    return success, "\n".join(log)
+
+
+
