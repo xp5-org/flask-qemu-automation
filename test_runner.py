@@ -9,14 +9,15 @@ import datetime
 from PIL import Image
 import pytesseract
 import shutil
-import buildtest
+#import mytests.buildtest
+#import mytests.playtest
+
 import os
 import shutil
 import re
 import datetime
 
 import helpers
-import buildtest  # importing runs the decorators, fills helpers.test_registry
 
 QEMU_IMAGE = "hdd.qcow2"
 MONITOR_PORT = 55555
@@ -30,8 +31,72 @@ compile_logs_dir = "compile_logs"
 context = {
     "sock": None,
     "qemu_process": None,
-    "abort": False  # <-- NEW FLAG
+    "abort": False
 }
+
+
+
+import datetime
+import importlib
+
+
+def run_testfile(module_name):
+    import importlib
+    full_module_name = f"mytests.{module_name}"
+
+    try:
+        importlib.import_module(full_module_name)
+    except ImportError as e:
+        print(f"Failed to import {full_module_name}: {e}")
+        return []
+
+    # Lookup testfile metadata by full module name
+    meta = helpers.testfile_registry.get(full_module_name)
+    if not meta:
+        print(f"No metadata found for module '{full_module_name}' in helpers.testfile_registry")
+        return []
+
+    test_types = meta.get("types", [])
+    results = []
+    context = {"sock": None, "qemu_process": None}
+
+    # Map test types to global registries
+    registry_map = {
+        "build": helpers.buildtest_registry,
+        "play": helpers.playtest_registry,
+        "package": helpers.packagetest_registry,  # fix spelling if possible
+    }
+
+    for t in test_types:
+        registry = registry_map.get(t)
+        if not registry:
+            print(f"No registry found for test type '{t}'")
+            continue
+
+        # Filter tests defined in this module only
+        tests = [f for f in registry if f.__module__ == full_module_name]
+
+        if not tests:
+            print(f"No tests found in registry '{t}' for module '{full_module_name}'")
+            continue
+
+        test_cases = [f.test_description for f in tests]
+        results.extend(run_tests(test_cases, tests, context))
+
+    if context.get("qemu_process"):
+        context["qemu_process"].terminate()
+        context["qemu_process"].wait(timeout=5)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    subdir_path = os.path.join(REPORT_DIR, timestamp)
+    if not os.path.exists(subdir_path):
+        os.makedirs(subdir_path, exist_ok=True)
+    report_path = os.path.join(subdir_path, f"{module_name}.html")
+    generate_report(results, report_path)
+
+    return results
+
+
 
 
 
@@ -59,17 +124,16 @@ def run_tests(test_descriptions, registry, context):
     total = len(test_descriptions)
 
     with open(PROGRESS_FILE + ".tmp", "w") as pf:
-        pf.write(f"0/{total}")
+        pf.write(f"0/{total}|Starting")
     os.replace(PROGRESS_FILE + ".tmp", PROGRESS_FILE)
 
     for index, name in enumerate(test_descriptions, start=1):
         with open(PROGRESS_FILE + ".tmp", "w") as pf:
-            pf.write(f"{index-1}/{total}")
+            pf.write(f"{index-1}/{total}|{name}")
         os.replace(PROGRESS_FILE + ".tmp", PROGRESS_FILE)
 
         print(f"Running test {index}/{total}: {name}")
-        
-        # Abort remaining tests if a critical failure occurred
+
         if context.get("abort"):
             print(f"Skipping {name} due to previous failure")
             results.append((name, "SKIPPED", "gray", "Skipped due to earlier failure", "", 0.0))
@@ -82,50 +146,6 @@ def run_tests(test_descriptions, registry, context):
     print(f"Completed {len(results)}/{total}")
     time.sleep(1)
     return results
-
-
-def run_mybuildtests():
-    import datetime
-    import buildtest
-
-    test_cases = [f.test_description for f in helpers.buildtest_registry]
-    context = {"sock": None, "qemu_process": None}
-
-    results = run_tests(test_cases, helpers.buildtest_registry, context)
-
-    if context.get("qemu_process"):
-        context["qemu_process"].terminate()
-        context["qemu_process"].wait(timeout=5)
-
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    subdir_path = os.path.join(REPORT_DIR, timestamp)
-    os.makedirs(subdir_path, exist_ok=True)
-    report_filename = f"report_{timestamp}.html"
-    report_path = os.path.join(subdir_path, report_filename)
-
-    generate_report(results, report_path)
-
-
-def run_myplaytests():
-    import datetime
-    import playtest
-    
-    test_cases = [f.test_description for f in helpers.playtest_registry]
-    context = {"sock": None, "qemu_process": None}
-
-    results = run_tests(test_cases, helpers.playtest_registry, context)
-
-    if context.get("qemu_process"):
-        context["qemu_process"].terminate()
-        context["qemu_process"].wait(timeout=5)
-
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    subdir_path = os.path.join(REPORT_DIR, timestamp)
-    os.makedirs(subdir_path, exist_ok=True)
-    report_filename = f"report_{timestamp}.html"
-    report_path = os.path.join(subdir_path, report_filename)
-
-    generate_report(results, report_path)
 
 
 
@@ -158,9 +178,41 @@ th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
 .green { background-color: #c8f7c5; }
 .red { background-color: #f7c5c5; }
 .gray { background-color: #eeeeee; }
-pre { background-color: #eee; padding: 10px; white-space: pre-wrap; }
+
+.flex-container {
+    display: flex;
+    gap: 20px;
+    flex-wrap: nowrap;
+    max-width: 100%;
+}
+
+.output-column {
+    flex: 1;
+    min-width: 0;
+    max-width: 50%;
+    overflow: hidden;
+    background-color: #f0f0f0;
+    padding: 10px;
+}
+
+.image-column {
+    flex: 1;
+    max-width: 50%;
+}
+
+pre {
+    background-color: #eee;
+    padding: 10px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
+    overflow-x: auto;
+}
 hr { margin: 40px 0; }
 </style>
+
+
 </head>
 <body>
 <h1>Test Report</h1>
@@ -187,7 +239,6 @@ hr { margin: 40px 0; }
                 if idx not in screenshot_map:
                     screenshot_map[idx] = fname
 
-        # In the loop that writes report details:
         for idx, (name, status, color, output, stdout, duration) in enumerate(results):
             img_index = idx + 1
             if img_index in screenshot_map:
@@ -198,19 +249,20 @@ hr { margin: 40px 0; }
 
             f.write(f"""
 <hr>
-<div style="display: flex; gap: 20px;">
-    <div style="flex: 1; background-color: #f0f0f0; padding: 10px;">
+<div class="flex-container">
+    <div class="output-column">
         <h3>{name}</h3>
         <p><strong>Duration:</strong> {duration:.2f} seconds</p>
         <pre>
         OUTPUT:\n{output}\n\n
         STDOUT:\n{stdout}\n\n</pre>
     </div>
-    <div style="flex: 1;">
+    <div class="image-column">
         <h4>Screenshot</h4>
         {img_tag}
     </div>
 </div>
+
 """)
 
         f.write("</body></html>")

@@ -1,10 +1,23 @@
-from helpers import register_buildtest  # import the decorator
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from helpers import register_testfile  # decorator tool here
+from helpers import register_buildtest
 from helpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, send_monitor_string, ppdcompile, take_screenshot, send_monitor_key, save_snapshot, start_buildtest_qemu, convert_raw_to_qcow2, attach_floppy_to_qemu, detach_floppy_from_qemu
+from helpers import register_testfile
 import time
 
 testfailstatus = 0
 
 
+
+
+register_testfile(
+    id="Pacific C",
+    types=["build"],
+    system="qemu",
+    platform="MSDOS i386",
+)(sys.modules[__name__])
 
 
 @register_buildtest("Build 1 - Copy files to hdd.img")
@@ -13,7 +26,6 @@ def test1_copy_files(context):
     log = []
     success,output = copy_to_fat_image("sourced", "hdd.img")
     log.append(output)
-    # test code here, return (success, log_output)
     return success, "\n".join(log)
 
 @register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
@@ -22,7 +34,6 @@ def test2_diskconv(context):
     log = []
     success, output = convert_raw_to_qcow2()
     log.append(output)
-    # test code here, return (success, log_output)
     return success, "\n".join(log)
 
 
@@ -32,27 +43,26 @@ def test3_start_qemu(context):
     import threading
     import time
     import helpers
+
     log = []
     try:
-        qemu_process = helpers.start_buildtest_qemu()
-
-        # Thread to read stdout continuously and append to log
+        qemu_process = helpers.start_playtest_qemu()
+        
+        # stdout capture thread
         def read_stdout(proc, log_list):
             for line in iter(proc.stdout.readline, ''):
                 log_list.append(line.rstrip())
             proc.stdout.close()
 
+        # qemu in its own thread
         qemu_thread = threading.Thread(target=read_stdout, args=(qemu_process, log))
         qemu_thread.daemon = True
         qemu_thread.start()
 
-        # Wait for monitor socket to become available
-        sock = helpers.wait_for_monitor(timeout=30)  # Add timeout if possible
+        # wait for monitor socket
+        sock = helpers.wait_for_monitor(timeout=5)
         if not sock:
             return False, "Failed to connect to QEMU monitor socket.\n" + "\n".join(log)
-
-        # Extra delay to let QEMU settle
-        time.sleep(0.1)
 
         context["sock"] = sock
         context["qemu_process"] = qemu_process
@@ -72,7 +82,8 @@ def test4_bootdos(context):
         return False, "No QEMU monitor socket available"
     stdout_lines = []
     log = []
-    time.sleep(3) # wait for dos to boot before starting OCR
+    time.sleep(3) # wait for dos to boot
+    # attach_floppy_to_qemu("tmpfloppydisk.img") # i think this can be removed
 
     searchphrase = "msdos ready"
     success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10, startx=0, starty=0, stopx=160, stopy=480)

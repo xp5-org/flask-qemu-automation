@@ -4,10 +4,27 @@ from flask import Flask, render_template, send_from_directory, redirect, url_for
 from bs4 import BeautifulSoup
 import test_runner
 import threading
+import helpers
+from flask import jsonify
+
 
 app = Flask(__name__)
+REPORT_DIR = "reports"
 build_REPORT_DIR = "reports"
 play_REPORT_DIR = "reports"
+
+
+import os
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return app.send_static_file('favicon.ico')
+
+
+
+
+
 
 def get_report_summaries():
     if not os.path.exists(build_REPORT_DIR):
@@ -58,6 +75,62 @@ def get_report_summaries():
             summaries.append((report, "", "ERROR"))
 
     return summaries
+
+
+
+
+from collections import defaultdict
+
+from flask import jsonify
+
+@app.route("/testfile_list")
+def testfile_list():
+    import importlib
+    import pkgutil
+    import mytests
+    from collections import defaultdict
+
+    for _, modname, _ in pkgutil.iter_modules(mytests.__path__):
+        importlib.import_module(f"mytests.{modname}")
+
+    grouped = defaultdict(lambda: {
+        "types": {},
+        "files": [],
+        "description": None,
+        "system": None,
+        "platform": None,
+    })
+
+    for modname, meta in helpers.testfile_registry.items():
+        file = modname.split('.')[-1]
+        for t in meta["types"]:
+            grouped[meta["id"]]["types"][t] = file
+        grouped[meta["id"]]["files"].append(file)
+        # Only set description, system, platform if not set yet
+        if grouped[meta["id"]]["description"] is None:
+            grouped[meta["id"]]["description"] = meta.get("description")
+        if grouped[meta["id"]]["system"] is None:
+            grouped[meta["id"]]["system"] = meta.get("system")
+        if grouped[meta["id"]]["platform"] is None:
+            grouped[meta["id"]]["platform"] = meta.get("platform")
+
+    result = []
+    for test_id, info in grouped.items():
+        result.append({
+            "id": test_id,
+            "types": info["types"],
+            "description": info["description"],
+            "system": info["system"],
+            "platform": info["platform"],
+        })
+
+    print("Returning testfile list:", result)  # debug print
+    return jsonify(result)
+
+
+
+
+
 
 
 
@@ -118,50 +191,48 @@ def index():
 
 
 
-@app.route("/run_build")
-def run_buildtests():
-    print("run buildtests called")
+
+
+
+@app.route("/run/<testname>")
+def run_named_tests(testname):
+    print(f"run {testname} called")
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"report_{timestamp}.html"
-    path = os.path.join(build_REPORT_DIR, filename)
+    path = os.path.join(REPORT_DIR, filename)
 
     def run():
-        test_runner.run_mybuildtests()
+        test_runner.run_testfile(testname)
         with open("progress.txt", "w") as pf:
             pf.write("Done")
 
     with open("progress.txt", "w") as pf:
-        pf.write("0/0") 
-
-    threading.Thread(target=run).start()
-    return "Started"
-
-@app.route("/run_play")
-def run_playtests():
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"report_{timestamp}.html"
-    path = os.path.join(play_REPORT_DIR, filename)
-
-    def run():
-        test_runner.run_myplaytests()
-        with open("progress.txt", "w") as pf:
-            pf.write("Done")
-
-    with open("progress.txt", "w") as pf:
-        pf.write("0/0") 
+        pf.write("0/0")
 
     threading.Thread(target=run).start()
     return "Started"
 
 
+
+
+from flask import jsonify
 
 @app.route("/progress")
 def progress():
     try:
         with open("progress.txt", "r") as f:
-            return f.read()
+            data = f.read().strip()
+            if "|" in data:
+                step, test_name = data.split("|", 1)
+            else:
+                step, test_name = data, ""
+            return jsonify({
+                "step": step,
+                "test_name": test_name
+            })
     except FileNotFoundError:
-        return "Done"
+        return jsonify({"step": "Done", "test_name": ""})
+
 
 
 @app.route("/reports/<path:filepath>")

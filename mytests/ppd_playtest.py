@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from helpers import register_playtest, load_snapshot, send_monitor_string, take_screenshots_to_gif, take_screenshot, ocr_word_find, start_playtest_qemu, make_floppy_image, attach_floppy_to_qemu
 import time
 
@@ -5,6 +9,13 @@ import time
 
 
 
+from helpers import register_testfile
+register_testfile(
+    id="Pacific C",
+    types=["play"],
+    system="qemu",
+    platform="MSDOS i386",
+)(sys.modules[__name__])
 
 
 
@@ -12,30 +23,27 @@ import time
 @register_playtest("Test1 - Start QEMU")
 def test3_start_qemu(context):
     import threading
-    import time
     import helpers
 
     log = []
     try:
         qemu_process = helpers.start_playtest_qemu()
-
-        # Thread to read stdout continuously and append to log
+        
+        # stdout capture thread
         def read_stdout(proc, log_list):
             for line in iter(proc.stdout.readline, ''):
                 log_list.append(line.rstrip())
             proc.stdout.close()
 
+        # qemu in its own thread
         qemu_thread = threading.Thread(target=read_stdout, args=(qemu_process, log))
         qemu_thread.daemon = True
         qemu_thread.start()
 
-        # Wait for monitor socket to become available
-        sock = helpers.wait_for_monitor(timeout=30)  # Add timeout if possible
+        # wait for monitor socket
+        sock = helpers.wait_for_monitor(timeout=5)
         if not sock:
             return False, "Failed to connect to QEMU monitor socket.\n" + "\n".join(log)
-
-        # Extra delay to let QEMU settle
-        time.sleep(1)
 
         context["sock"] = sock
         context["qemu_process"] = qemu_process
