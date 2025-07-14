@@ -55,18 +55,23 @@ RUN mkdir -p /var/run/dbus && \
 ENV VENV_PATH=/opt/venv
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-WORKDIR /app
+WORKDIR /root
 
-RUN git clone https://github.com/xp5-org/flask-qemu-automation.git /app
+#RUN git clone https://github.com/xp5-org/flask-qemu-automation.git /app
 
-# Create the virtual environment and install dependencies
-RUN python3 -m venv $VENV_PATH && \
-    $VENV_PATH/bin/pip install --upgrade pip && \
-    $VENV_PATH/bin/pip install -r requirements.txt
+COPY requirements.txt /app/
+# create venv
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install -r /app/requirements.txt && \
+    chgrp -R users /opt/venv && \
+    chmod -R g+rwX /opt/venv && \
+    find /opt/venv -type d -exec chmod g+s {} \;
+ENV VENV_PATH=/opt/venv
 
 
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+COPY entrypoint.sh /app
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 3389 8080
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -28,7 +28,7 @@ usermod -aG sudo "$USERNAME"
 mkdir -p /home/$USERNAME/Desktop/
 cat <<EOF > /home/$USERNAME/Desktop/runme.sh
 #!/bin/bash
-xfce4-terminal --hold --command="bash -c '. /opt/venv/bin/activate && python3 /app/app.py'"
+xfce4-terminal --hold --command="bash -c '. /opt/venv/bin/activate && python3 /testrunnerapp/app.py'"
 EOF
 
 chmod +x /home/$USERNAME/Desktop/runme.sh
