@@ -1,10 +1,9 @@
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from helpers import register_testfile  # decorator tool here
-from helpers import register_buildtest
-from helpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, send_monitor_string, ppdcompile, take_screenshot, send_monitor_key, save_snapshot, start_buildtest_qemu, convert_raw_to_qcow2, attach_floppy_to_qemu, detach_floppy_from_qemu
-from helpers import register_testfile
+from helpers import register_buildtest, register_testfile
+from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2
+from qemuhelpers import QemuInstance  # adjust path if needed
 import time
 
 testfailstatus = 0
@@ -38,61 +37,71 @@ def test2_diskconv(context):
 
 
 
-@register_buildtest("Build 3 - Start QEMU")
+
+
+@register_buildtest("Build 3 - Start QEMU using class")
 def test3_start_qemu(context):
-    import threading
-    import time
-    import helpers
+    name = "qemu0"
+    port = 55555
+    image_path = "hdd.qcow2"
+    floppy_path = "tmpfloppydisk.img"
 
-    log = []
-    try:
-        qemu_process = helpers.start_playtest_qemu()
-        
-        # stdout capture thread
-        def read_stdout(proc, log_list):
-            for line in iter(proc.stdout.readline, ''):
-                log_list.append(line.rstrip())
-            proc.stdout.close()
+    log = [f"Starting {name} on port {port} with image={image_path}"]
 
-        # qemu in its own thread
-        qemu_thread = threading.Thread(target=read_stdout, args=(qemu_process, log))
-        qemu_thread.daemon = True
-        qemu_thread.start()
+    instance = QemuInstance(name, image_path, port, floppy_path=floppy_path)
 
-        # wait for monitor socket
-        sock = helpers.wait_for_monitor(timeout=5)
-        if not sock:
-            return False, "Failed to connect to QEMU monitor socket.\n" + "\n".join(log)
-
-        context["sock"] = sock
-        context["qemu_process"] = qemu_process
-        return True, "QEMU started successfully.\n" + "\n".join(log)
-
-    except Exception as e:
-        log.append(f"Exception starting QEMU: {e}")
+    if not instance.start():
+        log.append(f"{name} failed to start or connect to monitor.")
+        context["abort"] = True
         return False, "\n".join(log)
+
+    if not instance.wait_for_ready():
+        log.append(f"{name} did not become ready.")
+        log.append(f"{name} stdout:\n{''.join(instance.get_output())}")
+        return False, "\n".join(log)
+
+    context[name] = instance
+    log.append(f"{name} is ready.")
+    log.append(f"{name} stdout:\n{''.join(instance.get_output())}")
+    return True, "\n".join(log)
+
 
 
 
 
 @register_buildtest("Build 4 - Boot to Dos")
 def test4_bootdos(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
-    stdout_lines = []
+    instance = context.get("qemu_instance")
+    if not instance:
+        return False, "No QEMU instance available in context"
+
     log = []
-    time.sleep(3) # wait for dos to boot
-    # attach_floppy_to_qemu("tmpfloppydisk.img") # i think this can be removed
+    time.sleep(3)  # wait for DOS to boot
 
     searchphrase = "msdos ready"
-    success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10, startx=0, starty=0, stopx=160, stopy=480)
-    take_screenshot(sock, "reports/test4")
+    success, ocr_text, attempts, ocrlog = ocr_word_find(
+        instance.sock,
+        searchphrase,
+        timeout=10,
+        startx=0,
+        starty=0,
+        stopx=160,
+        stopy=480
+    )
+
+    ok, msg = instance.take_screenshot("reports/test4.png")
+    if not ok:
+        log.append(f"[{instance.name}] Screenshot failed: {msg}")
+    else:
+        log.append(f"[{instance.name}] Screenshot taken: {msg}")
+
     log.append("Checked DOS prompt")
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
+
     return success, "\n".join(log)
+
 
 
 

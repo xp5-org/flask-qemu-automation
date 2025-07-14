@@ -21,7 +21,17 @@ compile_logs_dir = "compile_logs"
 
 
 
+
+
+
 testfile_registry = {}
+
+
+def clear_registries():
+    buildtest_registry[:] = []
+    playtest_registry[:] = []
+    packagetest_registry[:] = []
+    testfile_registry.clear()
 
 def register_testfile(id, types, description=None, system=None, platform=None):
     def decorator(module=None):
@@ -161,60 +171,6 @@ def copy_to_fat_image(src_dir, image_path):
     finally:
         os.unlink(config_path)
 
-
-
-
-def convert_raw_to_qcow2(raw_path=RAW_IMAGE, qcow2_path=QEMU_IMAGE):
-    if not os.path.isfile(raw_path):
-        return False, f"[error] Raw image not found: {raw_path}"
-
-    if qcow2_path is None:
-        qcow2_path = os.path.splitext(raw_path)[0] + ".qcow2"
-
-    try:
-        result = subprocess.run(
-            ["qemu-img", "convert", "-O", "qcow2", raw_path, qcow2_path],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        output = result.stdout.decode("utf-8", errors="replace")
-        return True, output
-    except subprocess.CalledProcessError as e:
-        output = e.stdout.decode("utf-8", errors="replace") if e.stdout else ''
-        return False, output
-
-    
-
-
-
-def copy_from_fat_image(dst_dir, image_path):
-    log = []
-    os.makedirs(dst_dir, exist_ok=True)
-    mtools_config = f'drive h: file="{image_path}" offset=32256\n'
-    with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-        tmp.write(mtools_config)
-        config_path = tmp.name
-
-    try:
-        try:
-            result = subprocess.run(
-                f'MTOOLSRC={config_path} mcopy -n -o -s h:/src/ {dst_dir}/',
-                shell=True,
-                check=True,
-                executable="/bin/bash",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            output = result.stdout.decode('utf-8', errors='replace')
-            log.append(output)           
-            return True, output
-        except subprocess.CalledProcessError as e:
-            output = e.stdout.decode('utf-8', errors='replace') if e.stdout else ''
-            log.append(output)
-            return False, output
-    finally:
-        os.unlink(config_path)
 
 def send_monitor_key(sock, keyname, ctrl=False, alt=False, shift=False, delay=0.1):
     mods = []

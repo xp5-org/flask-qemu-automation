@@ -13,6 +13,9 @@ import shutil
 #import mytests.playtest
 
 import os
+import importlib
+from collections import defaultdict
+import sys
 import shutil
 import re
 import datetime
@@ -22,9 +25,9 @@ import helpers
 QEMU_IMAGE = "hdd.qcow2"
 MONITOR_PORT = 55555
 PROGRESS_FILE = "progress.txt"
-REPORT_DIR = "reports"
-qemu_process = None
-compile_logs_dir = "compile_logs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORT_DIR = os.path.join(BASE_DIR, "reports")
+compile_logs_dir = os.path.join(BASE_DIR, "compile_logs")
 
 
 
@@ -36,12 +39,26 @@ context = {
 
 
 
-import datetime
-import importlib
+
+
+
+def reload_tests():
+    helpers.clear_registries()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    test_dir = os.path.join(base_dir, "mytests")
+    for fname in os.listdir(test_dir):
+        if fname.endswith(".py") and not fname.startswith("__"):
+            modname = f"mytests.{fname[:-3]}"
+            if modname in sys.modules:
+                importlib.reload(sys.modules[modname])
+            else:
+                __import__(modname)
+
 
 
 def run_testfile(module_name):
-    import importlib
+    reload_tests() 
+
     full_module_name = f"mytests.{module_name}"
 
     try:
@@ -120,6 +137,7 @@ def run_registered_test(name, registry, context):
 
 
 def run_tests(test_descriptions, registry, context):
+    reload_tests()
     results = []
     total = len(test_descriptions)
 
@@ -166,6 +184,15 @@ def generate_report(results, report_path):
         if re.match(r"test\d+\.(png|ppm|gif)$", filename):
             shutil.move(os.path.join(REPORT_DIR, filename), subdir_path)
 
+    # Collect screenshots by integer test step
+    screenshot_map = defaultdict(list)
+    for fname in os.listdir(subdir_path):
+        if fname.endswith((".png", ".gif")):
+            # Match filenames like screenshot-vice1-6-1.png or screenshot-vice2-6.png
+            m = re.match(r"screenshot-[^-]+-(\d+)(?:-\d+)?\.(png|gif)$", fname)
+            if m:
+                step_num = int(m.group(1))
+                screenshot_map[step_num].append(fname)
 
     with open(report_path, "w") as f:
         f.write("""<html>
