@@ -453,34 +453,6 @@ def detach_floppy_from_qemu(sock):
 
 
 
-def start_playtest_qemu():
-    global qemu_process
-    dummy_floppy = "tmpfloppydisk.img"
-    qemu_process = subprocess.Popen([
-        "qemu-system-i386",
-        "-hda", QEMU_IMAGE,
-        "-m", "4M",
-        "-vga", "std",
-        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
-        "-vga", "std"
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    return qemu_process
-
-
-def start_buildtest_qemu():
-    global qemu_process
-    qemu_process = subprocess.Popen([
-        "qemu-system-i386",
-        "-hda", QEMU_IMAGE,
-        "-m", "4M",
-        "-monitor", "tcp:127.0.0.1:55555,server,nowait",
-        "-vga", "std",
-        "-fda", "tmpfloppydisk.img"
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    return qemu_process
-
-
-
 def wait_for_monitor(timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:

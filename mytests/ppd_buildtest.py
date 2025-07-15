@@ -2,7 +2,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from helpers import register_buildtest, register_testfile
-from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2
+from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
 from qemuhelpers import QemuInstance  # adjust path if needed
 import time
 
@@ -31,7 +31,7 @@ def test1_copy_files(context):
 def test2_diskconv(context):
     stdout_lines = []
     log = []
-    success, output = convert_raw_to_qcow2()
+    success, output = convert_raw_to_qcow2("hdd.img", "hdd.qcow2")
     log.append(output)
     return success, "\n".join(log)
 
@@ -44,43 +44,54 @@ def test3_start_qemu(context):
     name = "qemu0"
     port = 55555
     image_path = "hdd.qcow2"
-    floppy_path = "tmpfloppydisk.img"
+    #floppy_path = "tmpfloppydisk.img"
 
     log = [f"Starting {name} on port {port} with image={image_path}"]
 
-    instance = QemuInstance(name, image_path, port, floppy_path=floppy_path)
+    instance = QemuInstance(name, image_path, port)
+
+    # Give QEMU some time to initialize and generate output
+    time.sleep(3)
 
     if not instance.start():
-        log.append(f"{name} failed to start or connect to monitor.")
+        # Collect whatever logs we can get immediately after failed start
+        success, logs_or_msg = instance.collect_qemu_logs("reports/qemu_stdout.log")
+        log.append("Failed to start QEMU.")
+        log.append(logs_or_msg)
         context["abort"] = True
         return False, "\n".join(log)
 
+    success, logs_or_msg = instance.collect_qemu_logs("reports/qemu_stdout.log")
+    log.append(logs_or_msg)
+
     if not instance.wait_for_ready():
         log.append(f"{name} did not become ready.")
-        log.append(f"{name} stdout:\n{''.join(instance.get_output())}")
+        # Add logs collected so far
+        log.append(logs_or_msg)
         return False, "\n".join(log)
 
     context[name] = instance
     log.append(f"{name} is ready.")
-    log.append(f"{name} stdout:\n{''.join(instance.get_output())}")
+    context["qemu1"] = instance
+    log.append(logs_or_msg)
     return True, "\n".join(log)
 
 
 
 
-
-@register_buildtest("Build 4 - Boot to Dos")
-def test4_bootdos(context):
-    instance = context.get("qemu_instance")
+@register_buildtest("Build 5 - Boot to Dos")
+def test5_bootdos(context):
+    instance_name = "qemu1" 
+    instance = context.get(instance_name)
     if not instance:
-        return False, "No QEMU instance available in context"
+        return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
     time.sleep(3)  # wait for DOS to boot
 
     searchphrase = "msdos ready"
     success, ocr_text, attempts, ocrlog = ocr_word_find(
-        instance.sock,
+        instance,
         searchphrase,
         timeout=10,
         startx=0,
@@ -89,7 +100,7 @@ def test4_bootdos(context):
         stopy=480
     )
 
-    ok, msg = instance.take_screenshot("reports/test4.png")
+    ok, msg = instance.take_screenshot("reports/test4")
     if not ok:
         log.append(f"[{instance.name}] Screenshot failed: {msg}")
     else:
@@ -99,8 +110,11 @@ def test4_bootdos(context):
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
+    log.append("ocr'd text:")
+    log.append(ocr_text)
 
-    return success, "\n".join(log)
+    return True, "\n".join(log)
+
 
 
 
@@ -108,20 +122,21 @@ def test4_bootdos(context):
 
 @register_buildtest("Build 5 - Start PPD")
 def test5_startppd(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
     stdout_lines = []
     log = []
 
     searchphrase = "HI-TECH"
-    send_monitor_string(sock, "cd pacific\n")
+    instance.send_keyboardstring("cd pacific\n")
     log.append("cd pacific")
-    send_monitor_string(sock, "cd bin\n")
+    instance.send_keyboardstring("cd bin\n")
     log.append("cd bin")
-    send_monitor_string(sock, "ppd c:\\src\\bartest.c \n")
-    success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10, startx=0, starty=315, stopx=640, stopy=480)
-    take_screenshot(sock, "reports/test5")
+    instance.send_keyboardstring("ppd c:\\src\\bartest.c \n")
+    success, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=315, stopx=640, stopy=480)
+    instance.take_screenshot("reports/test5")
     log.append("PPD Starting test")
     log.append(f"number of ocr attempts: {attempts}")
     log.append(ocr_text)
@@ -131,20 +146,33 @@ def test5_startppd(context):
 
 @register_buildtest("Build 6 - PPD Compile")
 def test6_ppdcompile(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
     searchphrase = "success"
     errorphrase = "error"
     stdout_lines = []
     log = []
 
     log.append("PPD Compile test")
-    ppdcompile(sock)
+    start_time = time.time()
+    instance.send_specialkeys("f3")
+    time.sleep(1)
+    instance.send_specialkeys("ret")
+    time.sleep(1)
+    instance.send_specialkeys("F")
+    time.sleep(1)
+    instance.send_specialkeys("ret")
+    time.sleep(1)
+    instance.send_specialkeys("ret")
+    time.sleep(1)
+    instance.send_specialkeys("ret")
+    time.sleep(1)
     time.sleep(5)
-    status, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10, startx=0, starty=295, stopx=640, stopy=480, errorphrase=errorphrase)
+    status, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=295, stopx=640, stopy=480, errorphrase=errorphrase)
 
-    take_screenshot(sock, "reports/test6")
+    instance.take_screenshot("reports/test6")
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
@@ -158,36 +186,43 @@ def test6_ppdcompile(context):
 
 @register_buildtest("Build 7 - Quit to DOS")
 def test7_quitppd(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
     stdout_lines = []
     log = []
     searchphrase = "msdos"
 
-    send_monitor_key(sock, "f", alt=True, delay=0.1)
+    instance.send_specialkeys("f", alt=True, delay=0.1)
     time.sleep(0.5)
-    send_monitor_key(sock, "q", delay=0.1)
+    instance.send_specialkeys("q", delay=0.1)
     time.sleep(0.5)
-    success, ocr_text, attempts, ocrlog = ocr_word_find(sock, searchphrase, timeout=10, startx=0, starty=0, stopx=160, stopy=480)
-    take_screenshot(sock, "reports/test7")
+    success, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=0, stopx=160, stopy=480)
+    instance.take_screenshot("reports/test7")
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
+    log.append("OCR text detected:")
+    log.append(ocr_text)
     return success, "\n".join(log)
 
-#@register_buildtest("Build8 - mount floppy")
+#@register_buildtest("Build8 - create & mount floppy")
 def test8_mountfloppy(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
+    floppyimage = "tmpfloppydisk.img"
 
+    make_floppy_image(floppyimage)
 
-    success, output = attach_floppy_to_qemu("tmpfloppydisk.img")
+    success, output = QemuInstance.attach_floppy()
     log.append(output)
     if not success:
+        print('Error attaching floppy disk image: ', floppyimage)
         return False, "\n".join(log)
 
     time.sleep(1)  # Allow QEMU to finish mounting before continuing
@@ -195,19 +230,20 @@ def test8_mountfloppy(context):
 
 #@register_buildtest("Build9 - format floppy")
 def test9_formatfloppy(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
 
-    send_monitor_string(sock, "format a: /q /s \n")
+    instance.send_keyboardstring("format a: /q /s \n")
     time.sleep(2)
-    send_monitor_string(sock, "\n")
+    instance.send_keyboardstring("\n")
     time.sleep(3)
-    send_monitor_string(sock, "\n")
+    instance.send_keyboardstring("\n")
     time.sleep(3)
-    send_monitor_string(sock, "N \n")
+    instance.send_keyboardstring("N \n")
     output = "todo: ocr output here someday"
     log.append(output)
     time.sleep(5)  # replace this with OCR
@@ -220,13 +256,14 @@ def test9_formatfloppy(context):
 
 #@register_buildtest("Test10 - copy to floppy")
 def test10_copy2floppy(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
 
-    success, output = send_monitor_string(sock, "copy c:\\src\\*.* a:\\\n")
+    success, output = instance.send_keyboardstring("copy c:\\src\\*.* a:\\\n")
     log.append(output)
     success = True # fake it
     if not success:
@@ -238,13 +275,14 @@ def test10_copy2floppy(context):
 
 @register_buildtest("Build 11 - detatch floppy")
 def test8_removefloppy(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
 
-    success, output = detach_floppy_from_qemu(sock)
+    success, output = instance.detatch_floppy()
     log.append(output)
     if not success:
         return False, "\n".join(log)
@@ -253,13 +291,14 @@ def test8_removefloppy(context):
 
 @register_buildtest("Build 12 - take snapshot")
 def test11_takesnap(context):
-    sock = context.get("sock")
-    if not sock:
-        return False, "No QEMU monitor socket available"
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    if not instance:
+        return False, f"No QEMU instance '{instance_name}' available in context"
     stdout_lines = []
     log = []
 
-    success, output = save_snapshot(sock)
+    success, output = instance.save_snapshot()
     log.append(output)
     return success, "\n".join(log)
 

@@ -5,20 +5,66 @@ import os
 import time
 from PIL import Image
 import tempfile
+import os
+import time
+import subprocess
+import socket
+import tempfile
+import re
+import threading
+import datetime
+from PIL import Image
+import pytesseract
+import shutil
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+
 
 class QemuInstance:
     def __init__(self, name, image_path, monitor_port, floppy_path=None, memory="4M"):
         self.name = name
-        self.image_path = image_path
+        self.image_path = os.path.join(BASE_DIR, image_path)
         self.monitor_port = monitor_port
-        self.floppy_path = floppy_path
         self.memory = memory
         self.process = None
         self.sock = None
         self.stdout_lines = []
         self.stdout_thread = None
 
+        if floppy_path is not None:
+            self.floppy_path = os.path.join(BASE_DIR, floppy_path)
+        else:
+            self.floppy_path = None    
+
+
+    def wait_for_ready(self, timeout=10):
+        start = time.time()
+        while time.time() - start < timeout:
+            # Check if process is still running
+            if self.process.poll() is not None:
+                self.stdout_lines.append(f"QEMU process exited unexpectedly with code {self.process.returncode}")
+                return False
+            try:
+                sock = socket.create_connection(("127.0.0.1", self.monitor_port), timeout=1)
+                sock.close()
+                return True
+            except (ConnectionRefusedError, socket.timeout):
+                time.sleep(0.3)
+        self.stdout_lines.append(f"Timeout waiting for QEMU monitor on port {self.monitor_port}")
+        return False
+    
+
+    def _read_stdout(self):
+        if self.process and self.process.stdout:
+            for line in self.process.stdout:
+                self.stdout_lines.append(line.strip())
+
     def start(self):
+        print('disk path: ', self.image_path)
+        env = os.environ.copy()
         args = [
             "qemu-system-i386",
             "-hda", self.image_path,
@@ -29,30 +75,99 @@ class QemuInstance:
         if self.floppy_path:
             args.extend(["-fda", self.floppy_path])
 
-        self.process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
+        print("Starting QEMU with:", " ".join(args))
 
-        self.stdout_thread = threading.Thread(target=self._read_stdout)
+        try:
+            self.process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env
+            )
+        except OSError as e:
+            self.stdout_lines = [f"Failed to start QEMU: {e}"]
+            return False
+
+        # Wait briefly to see if process exits immediately
+        time.sleep(0.1)
+        retcode = self.process.poll()
+
+        if retcode is not None:
+            # Process exited immediately - capture all output
+            output, _ = self.process.communicate(timeout=1)
+            self.stdout_lines = [output] if output else ["[no output captured]"]
+            return False
+
+        # Process is still running - start thread for async read
+        self.stdout_thread = threading.Thread(target=self._read_stdout, name="QEMU-stdout-reader")
         self.stdout_thread.daemon = True
         self.stdout_thread.start()
+
+        # Wait some time for output to appear
+        start_time = time.time()
+        while time.time() - start_time < 5:
+            if self.stdout_lines:
+                break
+            time.sleep(0.1)
 
         if not self._wait_for_monitor():
             return False
 
-        self.sock = socket.create_connection(("127.0.0.1", self.monitor_port))
+        try:
+            self.sock = socket.create_connection(("127.0.0.1", self.monitor_port), timeout=2)
+        except Exception as e:
+            self.stdout_lines.append(f"[monitor socket error] {e}")
+            return False
+
         return True
 
+
+    def take_screenshot(self, name="screenshot"):
+        ppm_path_abs = os.path.join(BASE_DIR, name + ".ppm")
+        png_path_abs = os.path.join(BASE_DIR, name + ".png")
+        name = name.replace(" ", "_")  # sanitize filename
+
+
+        try:
+            time.sleep(0.5)
+            if not self.sock:
+                return False, "Monitor socket not connected"
+
+            self.sock.sendall(f"screendump {ppm_path_abs}\n".encode("utf-8"))
+            time.sleep(0.5)
+
+            start = time.time()
+            while not os.path.exists(ppm_path_abs):
+                if time.time() - start > 5:
+                    return False, f"Timed out waiting for screendump {ppm_path_abs}"
+                time.sleep(0.1)
+
+            img = Image.open(ppm_path_abs)
+            img.save(png_path_abs)
+        except Exception as e:
+            return False, f"Failed to take screenshot or convert image: {e}"
+
+        return True, png_path_abs
+
+
+
     def _wait_for_monitor(self, timeout=10):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        start = time.time()
+        while time.time() - start < timeout:
             try:
                 sock = socket.create_connection(("127.0.0.1", self.monitor_port), timeout=1)
                 sock.close()
-                return
-            except:
-                time.sleep(0.2)
-        raise RuntimeError(f"{self.name}: QEMU monitor timeout on port {self.monitor_port}")
+                print(f"[{self.name}] Monitor connected on port {self.monitor_port}")
+                return True
+            except (ConnectionRefusedError, socket.timeout) as e:
+                print(f"[{self.name}] Monitor connect attempt failed: {e}")
+                time.sleep(0.3)
+        self.stdout_lines.append(f"QEMU monitor timeout on port {self.monitor_port}")
+        print(f"[{self.name}] Monitor timeout on port {self.monitor_port}")
+        return False
+
 
     def send_command(self, cmd):
         with self.lock:
@@ -71,15 +186,23 @@ class QemuInstance:
     lock = threading.Lock()  # shared per-instance
 
     def send_key(self, keyname, ctrl=False, alt=False, shift=False, delay=0.1):
+        if not self.sock:
+            print(f"[{self.name}] No monitor socket connected")
+            return
+
         mods = []
         if ctrl: mods.append("ctrl")
         if alt: mods.append("alt")
         if shift: mods.append("shift")
         combo = "-".join(mods + [keyname]) if mods else keyname
-        self.send_command(f"sendkey {combo}")
+        try:
+            self.sock.sendall(f"sendkey {combo}\n".encode("utf-8"))
+        except Exception as e:
+            print(f"[{self.name}] Failed to send key: {e}")
         time.sleep(delay)
 
-    def type_string(self, text, delay=0.05):
+
+    def send_keyboardstring(self, text, delay=0.05):
         keymap = {
             'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f',
             'g': 'g', 'h': 'h', 'i': 'i', 'j': 'j', 'k': 'k', 'l': 'l',
@@ -106,6 +229,26 @@ class QemuInstance:
                 self.send_key(key, shift=shift, delay=delay)
             else:
                 print(f"[{self.name}] Unsupported char for sendkey: {repr(ch)}")
+
+
+    def send_specialkeys(self, keystr, ctrl=False, alt=False, shift=False, delay=0.1):
+    # this is for sending Function keys, return, alt etc
+        # Normalize input
+        key = keystr.lower()
+
+        # Map common synonyms
+        if key == 'enter':
+            key = 'ret'
+        elif key.startswith('f') and key[1:].isdigit():
+            key = key  # 'f1', 'f2', etc., sent as-is
+        elif key == 'return':
+            key = 'ret'
+
+        # You can add more mappings here if needed.
+
+        # Send the key via existing send_key method, no modifiers by default
+        self.send_key(keystr.lower(), ctrl=ctrl, alt=alt, shift=shift, delay=delay)
+
 
     def send_command(self, cmd):
         with self.lock:
@@ -142,6 +285,17 @@ class QemuInstance:
                     break
 
             return data.strip()
+        
+    def collect_qemu_logs(self, save_path=None):
+        logs = "\n".join(self.stdout_lines)
+        if save_path:
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(logs)
+            except Exception as e:
+                return False, f"Failed to write QEMU logs to {save_path}: {e}"
+        return True, logs
+
 
 
     def take_screenshots_to_gif(self, interval, count, gif_name="screencap.gif", base_name="frame"):
@@ -155,19 +309,19 @@ class QemuInstance:
 
             for i in range(count):
                 name = f"{base_name}_{i}"
-                ppm_path = os.path.join(temp_dir, name + ".ppm")
+                ppm_path_abs = os.path.join(temp_dir, name + ".ppm")
                 png_path = os.path.join(temp_dir, name + ".png")
 
-                self.send_command(f"screendump {ppm_path}")
+                self.send_command(f"screendump {ppm_path_abs}")
                 time.sleep(0.5)
 
                 wait_start = time.time()
-                while not os.path.exists(ppm_path):
+                while not os.path.exists(ppm_path_abs):
                     if time.time() - wait_start > 5:
-                        return False, f"[{self.name}] Timed out waiting for screendump {ppm_path}"
+                        return False, f"[{self.name}] Timed out waiting for screendump {ppm_path_abs}"
                     time.sleep(0.1)
 
-                img = Image.open(ppm_path)
+                img = Image.open(ppm_path_abs)
                 img.save(png_path)
                 frames.append(img.convert("RGB"))
 
@@ -199,26 +353,6 @@ class QemuInstance:
 
 
 
-    def take_screenshot(self, name="screenshot"):
-        name = name.replace(" ", "_")  # sanitize filename
-        ppm_path = os.path.abspath(name + ".ppm")
-        png_path = os.path.abspath(name + ".png")
-
-        self.send_command(f"screendump {ppm_path}")
-        time.sleep(0.5)
-
-        start = time.time()
-        while not os.path.exists(ppm_path):
-            if time.time() - start > 5:
-                return False, f"[{self.name}] Timed out waiting for screendump: {ppm_path}"
-            time.sleep(0.1)
-
-        try:
-            img = Image.open(ppm_path)
-            img.save(png_path)
-            return True, f"[{self.name}] Screenshot saved to: {png_path}"
-        except Exception as e:
-            return False, f"[{self.name}] Failed to convert PPM to PNG: {e}"
 
     def attach_floppy(self, path):
         if not os.path.exists(path):
@@ -231,7 +365,7 @@ class QemuInstance:
             return False, f"[{self.name}] Failed to attach floppy: {response.strip()}"
         return True, f"[{self.name}] Floppy attached successfully."
 
-    def eject_floppy(self):
+    def detatch_floppy(self):
         response = self.send_command("eject floppy0")
 
         if "ejected" in response.lower() or "floppy0" in response.lower():
@@ -242,7 +376,11 @@ class QemuInstance:
 
 
     def save_snapshot(self, name="snap1"):
-        return self.send_command(f"savevm {name}")
+        response = self.send_command(f"savevm {name}")
+        if "error" in response.lower():
+            return False, f"[{self.name}] Failed to save snapshot: {response}"
+        return True, f"[{self.name}] Snapshot '{name}' saved successfully."
+
 
     def load_snapshot(self, name="snap1"):
         response = self.send_command(f"loadvm {name}")
@@ -250,22 +388,7 @@ class QemuInstance:
             return False, f"[{self.name}] Failed to load snapshot: {response}"
         return True, f"[{self.name}] Snapshot '{name}' loaded successfully."
 
-    def take_screenshot(self, out_png="screenshot.png"):
-        ppm_path = out_png.replace(".png", ".ppm")
-        self.send_command(f"screendump {ppm_path}")
 
-        start = time.time()
-        while not os.path.exists(ppm_path):
-            if time.time() - start > 5:
-                return False, f"[{self.name}] Timeout waiting for screendump"
-            time.sleep(0.1)
-
-        try:
-            img = Image.open(ppm_path)
-            img.save(out_png)
-            return True, f"[{self.name}] Screenshot saved to {out_png}"
-        except Exception as e:
-            return False, f"[{self.name}] Failed to save PNG: {e}"
 
         
 
@@ -284,15 +407,17 @@ class QemuInstance:
 
 
 
-def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None, stopy=None, errorphrase=None):
-    log_dir = "./compile_logs"
-    os.makedirs(log_dir, exist_ok=True)
+def ocr_word_find(instance, phrase, timeout=10, startx=None, starty=None, stopx=None, stopy=None, errorphrase=None):
+    ocrlogdir = os.path.join(BASE_DIR, "compile_logs")
+    os.makedirs(ocrlogdir, exist_ok=True)
     log = []
 
     start_time = time.time()
     phrase_lower = phrase.lower()
     error_lower = errorphrase.lower() if errorphrase else None
     attempts = 0
+    text = ""
+
 
     for i in range(timeout):
         attempts += 1
@@ -301,12 +426,15 @@ def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None
         elapsed = int(iter_start - start_time)
         safe_phrase = phrase.replace(" ", "_")
         filename_base = f"{safe_phrase}_{elapsed}"
-        screenshot_path = os.path.join(log_dir, filename_base)
-
-        take_screenshot(sock, name=screenshot_path)
-
+        screenshot_path = os.path.join(ocrlogdir, filename_base)
         png_path = screenshot_path + ".png"
         txt_path = screenshot_path + ".txt"
+
+        ok, msg = instance.take_screenshot(screenshot_path)
+        print(f'OCR Screenshot Path: {screenshot_path}')
+        if not ok:
+            log.append(f"Screenshot failed: {msg}")
+            continue
 
         try:
             print('processing screenshot OCR...')
@@ -357,14 +485,16 @@ def ocr_word_find(sock, phrase, timeout=10, startx=None, starty=None, stopx=None
 
 
 
-def make_floppy_image(path):
+
+def make_floppy_image(filename):
+    absfloppypath = os.path.join(BASE_DIR, filename)
     size = 1474560  # 1.44 MB
-    if not os.path.exists(path):
-        with open(path, "wb") as f:
+    if not os.path.exists(absfloppypath):
+        with open(absfloppypath, "wb") as f:
             f.write(b"\x00" * size)
         return True, "Created new 1.44MB floppy image"
     else:
-        actual_size = os.path.getsize(path)
+        actual_size = os.path.getsize(absfloppypath)
         if actual_size != size:
             return False, f"Floppy image exists but is {actual_size} bytes, expected 1474560"
         return True, "Floppy image already exists with correct size"
@@ -372,16 +502,19 @@ def make_floppy_image(path):
 
 
 
-def convert_raw_to_qcow2(raw_path, qcow2_path):
-    if not os.path.isfile(raw_path):
-        return False, f"[error] Raw image not found: {raw_path}"
+def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
+    hddimg_abspath = os.path.join(BASE_DIR, hdd_img_input)
+    qcow2_abspath = os.path.join(BASE_DIR, qcow2_output)
+    if not os.path.isfile(hddimg_abspath):
+        return False, f"[error] Raw image not found: {hddimg_abspath}"
 
-    if qcow2_path is None:
-        qcow2_path = os.path.splitext(raw_path)[0] + ".qcow2"
+    if qcow2_output is None:
+        qcow2_output = os.path.splitext(qcow2_output)[0] + ".qcow2"
+        #forgot what this was for
 
     try:
         result = subprocess.run(
-            ["qemu-img", "convert", "-O", "qcow2", raw_path, qcow2_path],
+            ["qemu-img", "convert", "-O", "qcow2", hddimg_abspath, qcow2_abspath],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -395,9 +528,13 @@ def convert_raw_to_qcow2(raw_path, qcow2_path):
     
 
 
-def copy_to_fat_image(src_dir, image_path):
+def copy_to_fat_image(src_dir, hdd_img_path):
+    srcdir_abspath = os.path.join(BASE_DIR, src_dir)
+    hddimg_abspath = os.path.join(BASE_DIR, hdd_img_path)
+    print("src abs path: ", srcdir_abspath)
+    print("hdd abs path: ", hddimg_abspath)
     log = []
-    mtools_config = f'drive h: file="{image_path}" offset=32256\n'
+    mtools_config = f'drive h: file="{hddimg_abspath}" offset=32256\n'
     with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
         tmp.write(mtools_config)
         config_path = tmp.name
@@ -405,7 +542,7 @@ def copy_to_fat_image(src_dir, image_path):
     try:
         try:
             result = subprocess.run(
-                f'MTOOLSRC={config_path} mcopy -n -o -s {src_dir}/* h:/src/',
+                f'MTOOLSRC={config_path} mcopy -n -o -s {srcdir_abspath}/* h:/src/',
                 shell=True,
                 check=True,
                 executable="/bin/bash",
