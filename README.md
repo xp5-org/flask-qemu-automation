@@ -28,6 +28,27 @@ I like writing software and tools for DOS, but it’s tedious and takes many ste
 
 
 ## Build & Run demo
+```
+git clone https://github.com/xp5-org/flask-qemu-automation.git
+
+cd flask-qemu-automation
+
+docker build -t qemuflask .
+```
+
+after building the image can run it like this
+`/path/to/git-folder` needs to be wherever the full path to the previous git command resulted in downloading
+
+```
+docker run -it -d \
+  --name qemuflask_container \
+  -p 3389:3389 \
+  -p 8080:8080 \
+  -e USERPASSWORD=a \
+  -e USERNAME=user \
+  -v /path/to/git-folder:/testrunnerapp \
+  qemuflask
+```
 
 Build-test
 
