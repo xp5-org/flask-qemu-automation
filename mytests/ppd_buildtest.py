@@ -19,11 +19,11 @@ register_testfile(
 )(sys.modules[__name__])
 
 
-#@register_buildtest("Build 1 - Copy files to hdd.img")
+@register_buildtest("Build 1 - Copy files to hdd.img")
 def test1_copy_files(context):
     stdout_lines = []
     log = []
-    success,output = copy_to_fat_image("sourced", "hdd.img")
+    success,output = copy_to_fat_image("sourced", "/testrunnerapp/hdd.img")
     log.append(output)
     return success, "\n".join(log)
 
@@ -31,7 +31,7 @@ def test1_copy_files(context):
 def test2_diskconv(context):
     stdout_lines = []
     log = []
-    success, output = convert_raw_to_qcow2("hdd.img", "hdd.qcow2")
+    success, output = convert_raw_to_qcow2("/testrunnerapp/hdd.img", "/testrunnerapp/hdd.qcow2")
     log.append(output)
     return success, "\n".join(log)
 
@@ -44,7 +44,7 @@ def test3_start_qemu(context):
     name = "qemu0"
     cpuarch = "i386"
     port = 55555
-    image_path = "hdd.qcow2"
+    image_path = "/testrunnerapp/hdd.qcow2"
     #floppy_path = "tmpfloppydisk.img"
 
     log = [f"Starting {name} on port {port} with image={image_path}"]

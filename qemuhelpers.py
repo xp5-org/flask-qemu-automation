@@ -78,17 +78,17 @@ class QemuInstance:
 
         elif self.cpuarch == "m68k":
             args = [
-                "/home/user/qemu/build/qemu-bundle/usr/local/bin/qemu-system-m68k",
+                "/app/qemu/build/qemu-bundle/usr/local/bin/qemu-system-m68k",
                 "-L", "pc-bios",
                 "-M", "q800",
                 "-m", "64",
-                "-drive", "id=hd0,file=/app/m68k/pramdisk.img,format=raw,if=none",
+                "-drive", "id=hd0,file=/testrunnerapp/m68k/pramdisk.img,format=raw,if=none",
                 "-device", "scsi-hd,scsi-id=0,drive=hd0",
-                "-drive", "id=hd1,file=/app/m68k/maindisk.img,format=raw,if=none",
+                "-drive", "id=hd1,file=/testrunnerapp/m68k/maindisk.img,format=raw,if=none",
                 "-device", "scsi-hd,scsi-id=1,drive=hd1",
-                "-drive", "id=cd0,file=/app/m68k/MacOS761.iso,media=cdrom,if=none",
+                "-drive", "id=cd0,file=/testrunnerapp/m68k/MacOS761.iso,media=cdrom,if=none",
                 "-device", "scsi-cd,scsi-id=3,drive=cd0",
-                "-bios", "/app/m68k/Quadra-650.ROM",
+                "-bios", "/testrunnerapp/m68k/Quadra-650.ROM",
                 "-boot", "d",
                 "-audio", "none",
                  "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait"
@@ -113,7 +113,7 @@ class QemuInstance:
             return False
 
         # Wait briefly to see if process exits immediately
-        time.sleep(0.1)
+        time.sleep(1)
         retcode = self.process.poll()
 
         if retcode is not None:
@@ -312,7 +312,7 @@ class QemuInstance:
     def collect_qemu_logs(self, save_path=None):
         logs = "\n".join(self.stdout_lines)
         if save_path:
-            save_path = os.path.join("/app", save_path)
+            save_path = os.path.join("/testrunnerapp", save_path)
             try:
                 with open(save_path, "w", encoding="utf-8") as f:
                     f.write(logs)

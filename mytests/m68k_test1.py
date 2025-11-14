@@ -106,7 +106,7 @@ def test2_bootdos(context):
 def test3_startmac(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
-    button_path = "/app/buttontest/finder_window_closebutton.png"
+    button_path = "/testrunnerapp/buttontest/finder_window_closebutton.png"
     if not instance:
         return False, f"No QEMU instance '{instance_name}' available in context"
     stdout_lines = []
@@ -140,7 +140,7 @@ def test3_startmac(context):
 def test4_mac(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
-    button_path = "/app/buttontest/inactive_titlebar_system7.png"
+    button_path = "/testrunnerapp/buttontest/inactive_titlebar_system7.png"
     if not instance:
         return False, f"No QEMU instance '{instance_name}' available in context"
     stdout_lines = []

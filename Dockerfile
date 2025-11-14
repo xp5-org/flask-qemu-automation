@@ -64,7 +64,7 @@ RUN mkdir -p /var/run/dbus && \
 ENV VENV_PATH=/opt/venv
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-WORKDIR /root
+WORKDIR /app
 
 # build m68k from src
 RUN git clone https://gitlab.com/qemu-project/qemu.git && \
