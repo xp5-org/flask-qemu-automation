@@ -31,6 +31,7 @@ cat <<EOF > /home/$USERNAME/Desktop/runme.sh
 xfce4-terminal --hold --command="bash -c '. /opt/venv/bin/activate && python3 /testrunnerapp/app.py'"
 EOF
 
+echo -e "chmod running...\n"
 chmod +x /home/$USERNAME/Desktop/runme.sh
 sudo chown -R user:user /opt/venv
 sudo chown -R user:user /app

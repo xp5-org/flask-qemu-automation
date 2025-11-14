@@ -5,3 +5,7 @@
 /compile_logs
 *.qcow2
 *.ppm
+buttontest/image_converted.png
+buttontest/inactive_titlebar_system7_converted.png
+/m68k
+/ppcshaver

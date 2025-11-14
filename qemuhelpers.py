@@ -5,7 +5,6 @@ import os
 import time
 from PIL import Image
 import tempfile
-import os
 import time
 import subprocess
 import socket
@@ -13,7 +12,7 @@ import tempfile
 import re
 import threading
 import datetime
-from PIL import Image
+import numpy as np
 import pytesseract
 import shutil
 
@@ -24,11 +23,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class QemuInstance:
-    def __init__(self, name, image_path, monitor_port, floppy_path=None, memory="4M"):
+    def __init__(self, name, cpuarch, image_path, monitor_port, floppy_path=None, memory="4M"):
         self.name = name
         self.image_path = os.path.join(BASE_DIR, image_path)
         self.monitor_port = monitor_port
         self.memory = memory
+        self.cpuarch = cpuarch
         self.process = None
         self.sock = None
         self.stdout_lines = []
@@ -65,17 +65,39 @@ class QemuInstance:
     def start(self):
         print('disk path: ', self.image_path)
         env = os.environ.copy()
-        args = [
-            "qemu-system-i386",
-            "-hda", self.image_path,
-            "-m", self.memory,
-            "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait",
-            "-vga", "std"
-        ]
-        if self.floppy_path:
-            args.extend(["-fda", self.floppy_path])
+        if self.cpuarch == "i386":
+            args = [
+                "qemu-system-i386",
+                "-hda", self.image_path,
+                "-m", str(self.memory),
+                "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait",
+                "-vga", "std"
+            ]
+            if self.floppy_path:
+                args.extend(["-fda", self.floppy_path])
 
-        print("Starting QEMU with:", " ".join(args))
+        elif self.cpuarch == "m68k":
+            args = [
+                "/home/user/qemu/build/qemu-bundle/usr/local/bin/qemu-system-m68k",
+                "-L", "pc-bios",
+                "-M", "q800",
+                "-m", "64",
+                "-drive", "id=hd0,file=/app/m68k/pramdisk.img,format=raw,if=none",
+                "-device", "scsi-hd,scsi-id=0,drive=hd0",
+                "-drive", "id=hd1,file=/app/m68k/maindisk.img,format=raw,if=none",
+                "-device", "scsi-hd,scsi-id=1,drive=hd1",
+                "-drive", "id=cd0,file=/app/m68k/MacOS761.iso,media=cdrom,if=none",
+                "-device", "scsi-cd,scsi-id=3,drive=cd0",
+                "-bios", "/app/m68k/Quadra-650.ROM",
+                "-boot", "d",
+                "-audio", "none",
+                 "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait"
+            ]
+
+
+        else:
+            self.stdout_lines = [f"Unsupported CPU architecture: {self.cpuarch}"]
+            return False
 
         try:
             self.process = subprocess.Popen(
@@ -124,6 +146,8 @@ class QemuInstance:
         return True
 
 
+
+
     def take_screenshot(self, name="screenshot"):
         ppm_path_abs = os.path.join(BASE_DIR, name + ".ppm")
         png_path_abs = os.path.join(BASE_DIR, name + ".png")
@@ -167,21 +191,6 @@ class QemuInstance:
         self.stdout_lines.append(f"QEMU monitor timeout on port {self.monitor_port}")
         print(f"[{self.name}] Monitor timeout on port {self.monitor_port}")
         return False
-
-
-    def send_command(self, cmd):
-        with self.lock:
-            self.sock.sendall((cmd + "\n").encode("utf-8"))
-            data = ""
-            while True:
-                try:
-                    chunk = self.sock.recv(4096).decode("utf-8", errors="replace")
-                    data += chunk
-                    if "(qemu)" in chunk:
-                        break
-                except socket.timeout:
-                    break
-            return data.strip()
 
     lock = threading.Lock()  # shared per-instance
 
@@ -286,15 +295,32 @@ class QemuInstance:
 
             return data.strip()
         
+    def send_mouse_pos(self, x, y, dz=None):
+        if not self.sock:
+            return False, "Monitor socket not connected"
+        try:
+            if dz is not None:
+                cmd = f"mouse_move {x} {y} {dz}\n"
+            else:
+                cmd = f"mouse_move {x} {y}\n"
+            self.sock.sendall(cmd.encode("utf-8"))
+            return True, f"Mouse moved to ({x}, {y})"
+        except Exception as e:
+            return False, f"Failed to send mouse_move command: {e}"
+
+
     def collect_qemu_logs(self, save_path=None):
         logs = "\n".join(self.stdout_lines)
         if save_path:
+            save_path = os.path.join("/app", save_path)
             try:
                 with open(save_path, "w", encoding="utf-8") as f:
                     f.write(logs)
             except Exception as e:
                 return False, f"Failed to write QEMU logs to {save_path}: {e}"
         return True, logs
+
+
 
 
 
@@ -592,6 +618,33 @@ def copy_from_fat_image(dst_dir, image_path):
 
 
 
+
+def find_button_in_screenshot(button_path, screenshot_path):
+    # load both images as grayscale
+    full_img = Image.open(screenshot_path).convert("L")
+    button_img = Image.open(button_path).convert("L")
+
+    # optional: save converted images for inspection
+    full_converted_path = os.path.splitext(screenshot_path)[0] + "_converted.png"
+    button_converted_path = os.path.splitext(button_path)[0] + "_converted.png"
+    full_img.save(full_converted_path)
+    button_img.save(button_converted_path)
+
+    # convert to arrays
+    full_arr = np.array(full_img, dtype=np.uint8)
+    button_arr = np.array(button_img, dtype=np.uint8)
+
+    fh, fw = full_arr.shape
+    bh, bw = button_arr.shape
+
+    # slide button over full image 1 pixel at a time
+    for y in range(fh - bh + 1):
+        for x in range(fw - bw + 1):
+            patch = full_arr[y:y+bh, x:x+bw]
+            if (patch == button_arr).all():  # exact match
+                return True, (x, y)
+
+    return False, "Button not found"
 
 
 

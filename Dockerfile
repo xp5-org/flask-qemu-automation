@@ -25,8 +25,15 @@ RUN apt-get update && \
         python3-pip \
         python3-venv \
         build-essential \
-        # xterm for runme.sh debug
         xterm \
+        git \
+        libglib2.0-dev \
+        libfdt-dev \
+        libpixman-1-dev \
+        zlib1g-dev \
+        ninja-build \
+        libsdl2-dev \
+        libgtk-3-dev \
         qemu-system-i386 \
         qemu-system-gui \
         qemu-utils \
@@ -34,16 +41,18 @@ RUN apt-get update && \
         git \
         vim \
         python3-venv \
-        mtools && \
-    apt-get remove -y light-locker xscreensaver && \
-    apt-get autoremove -y && \
-    rm -rf /var/cache/apt /var/lib/apt/lists/*
+        mtools 
+
+RUN apt-get build-dep -y qemu-system-misc ninja || true
+RUN apt-get remove -y light-locker xscreensaver
+RUN apt-get autoremove -y
+RUN rm -rf /var/cache/apt /var/lib/apt/lists/*
 
 # Install Firefox manually
-RUN wget -O /tmp/firefox.tar.bz2 "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" --no-check-certificate && \
-    tar xvf /tmp/firefox.tar.bz2 -C /opt && \
-    ln -s /opt/firefox/firefox /usr/local/bin/firefox && \
-    rm /tmp/firefox.tar.bz2
+#RUN wget -O /tmp/firefox.tar.bz2 "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" --no-check-certificate && \
+#    tar xvf /tmp/firefox.tar.bz2 -C /opt && \
+#    ln -s /opt/firefox/firefox /usr/local/bin/firefox && \
+#    rm /tmp/firefox.tar.bz2
 
 # Fix XRDP/X11 setup
 RUN mkdir -p /var/run/dbus && \
@@ -57,7 +66,12 @@ ENV PATH="$VENV_PATH/bin:$PATH"
 
 WORKDIR /root
 
-#RUN git clone https://github.com/xp5-org/flask-qemu-automation.git /app
+# build m68k from src
+RUN git clone https://gitlab.com/qemu-project/qemu.git && \
+cd qemu && \
+./configure --target-list=m68k-softmmu --enable-gtk --enable-sdl --enable-slirp && \
+make -j4
+
 
 COPY requirements.txt /app/
 # create venv

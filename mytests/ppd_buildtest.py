@@ -19,7 +19,7 @@ register_testfile(
 )(sys.modules[__name__])
 
 
-@register_buildtest("Build 1 - Copy files to hdd.img")
+#@register_buildtest("Build 1 - Copy files to hdd.img")
 def test1_copy_files(context):
     stdout_lines = []
     log = []
@@ -27,7 +27,7 @@ def test1_copy_files(context):
     log.append(output)
     return success, "\n".join(log)
 
-@register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
+#@register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
 def test2_diskconv(context):
     stdout_lines = []
     log = []
@@ -42,13 +42,14 @@ def test2_diskconv(context):
 @register_buildtest("Build 3 - Start QEMU using class")
 def test3_start_qemu(context):
     name = "qemu0"
+    cpuarch = "i386"
     port = 55555
     image_path = "hdd.qcow2"
     #floppy_path = "tmpfloppydisk.img"
 
     log = [f"Starting {name} on port {port} with image={image_path}"]
 
-    instance = QemuInstance(name, image_path, port)
+    instance = QemuInstance(name, cpuarch, image_path, port)
 
     # Give QEMU some time to initialize and generate output
     time.sleep(3)
