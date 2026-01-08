@@ -33,8 +33,8 @@ EOF
 
 echo -e "chmod running...\n"
 chmod +x /home/$USERNAME/Desktop/runme.sh
-sudo chown -R user:user /opt/venv
-sudo chown -R user:user /app
+#sudo chown -R user:user /opt/venv
+#sudo chown -R user:user /app
 
 # Start and stop scripts
 echo -e "starting xrdp services...\n"

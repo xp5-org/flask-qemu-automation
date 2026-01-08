@@ -1,7 +1,15 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from helpers import register_buildtest, register_testfile
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
+TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
+TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
+TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
+
+# make app helpers dir visible
+if TESTSRC_HELPERDIR  not in sys.path:
+    sys.path.insert(0, TESTSRC_HELPERDIR )
+
+from apphelpers import register_buildtest, register_testfile
 from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
 from qemuhelpers import QemuInstance  # adjust path if needed
 import time

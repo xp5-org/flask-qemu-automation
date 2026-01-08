@@ -1,7 +1,16 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from helpers import register_buildtest, register_testfile
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
+# need to replace this path stuff with a config file
+TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
+TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
+TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
+
+# make app helpers dir visible
+if TESTSRC_HELPERDIR  not in sys.path:
+    sys.path.insert(0, TESTSRC_HELPERDIR )
+
+from apphelpers import register_buildtest, register_testfile
 from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
 from qemuhelpers import QemuInstance  # adjust path if needed
 import time
@@ -19,24 +28,30 @@ register_testfile(
 )(sys.modules[__name__])
 
 
+TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
+TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
+
+
 @register_buildtest("Build 1 - Copy files to hdd.img")
 def test1_copy_files(context):
-    stdout_lines = []
     log = []
-    success,output = copy_to_fat_image("sourced", "/testrunnerapp/hdd.img")
+    success, output = copy_to_fat_image("sourced", TESTSRC_BASEDIR + "/hdd.img")
     log.append(output)
+    if not success:
+        context["abort"] = True
+        return False, "\n".join(log)
     return success, "\n".join(log)
 
-#@register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
+
+@register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
 def test2_diskconv(context):
-    stdout_lines = []
     log = []
-    success, output = convert_raw_to_qcow2("/testrunnerapp/hdd.img", "/testrunnerapp/hdd.qcow2")
+    success, output = convert_raw_to_qcow2(TESTSRC_BASEDIR + "/hdd.img", TESTSRC_BASEDIR + "/hdd.qcow2")
     log.append(output)
+    if not success:
+        context["abort"] = True
+        return False, "\n".join(log)
     return success, "\n".join(log)
-
-
-
 
 
 @register_buildtest("Build 3 - Start QEMU using class")
@@ -44,7 +59,7 @@ def test3_start_qemu(context):
     name = "qemu0"
     cpuarch = "i386"
     port = 55555
-    image_path = "/testrunnerapp/hdd.qcow2"
+    image_path = (TESTSRC_BASEDIR + "/hdd.qcow2")
     #floppy_path = "tmpfloppydisk.img"
 
     log = [f"Starting {name} on port {port} with image={image_path}"]
@@ -78,10 +93,8 @@ def test3_start_qemu(context):
     return True, "\n".join(log)
 
 
-
-
-@register_buildtest("Build 5 - Boot to Dos")
-def test5_bootdos(context):
+@register_buildtest("Build 4 - Boot to Dos")
+def test4_bootdos(context):
     instance_name = "qemu1" 
     instance = context.get(instance_name)
     if not instance:
@@ -101,11 +114,11 @@ def test5_bootdos(context):
         stopy=480
     )
 
-    ok, msg = instance.take_screenshot("reports/test4")
-    if not ok:
-        log.append(f"[{instance.name}] Screenshot failed: {msg}")
+    success = instance.take_screenshot(test_step=4)
+    if not success:
+        log.append(f"[{instance.name}] Screenshot failed ")
     else:
-        log.append(f"[{instance.name}] Screenshot taken: {msg}")
+        log.append(f"[{instance.name}] Screenshot taken, ")
 
     log.append("Checked DOS prompt")
     log.append(f"number of ocr attempts: {attempts}")
@@ -115,10 +128,6 @@ def test5_bootdos(context):
     log.append(ocr_text)
 
     return True, "\n".join(log)
-
-
-
-
 
 
 @register_buildtest("Build 5 - Start PPD")
@@ -137,13 +146,18 @@ def test5_startppd(context):
     log.append("cd bin")
     instance.send_keyboardstring("ppd c:\\src\\bartest.c \n")
     success, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=315, stopx=640, stopy=480)
-    instance.take_screenshot("reports/test5")
+    screenshotsuccess = instance.take_screenshot(test_step=5)
+    if not screenshotsuccess:
+        log.append(f"[{instance.name}] Screenshot failed")
+    else:
+        log.append(f"[{instance.name}] Screenshot taken, ")
     log.append("PPD Starting test")
     log.append(f"number of ocr attempts: {attempts}")
     log.append(ocr_text)
     log.append("ocr function log:")
     log.extend(ocrlog)
     return success, "\n".join(log)
+
 
 @register_buildtest("Build 6 - PPD Compile")
 def test6_ppdcompile(context):
@@ -173,7 +187,11 @@ def test6_ppdcompile(context):
     time.sleep(5)
     status, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=295, stopx=640, stopy=480, errorphrase=errorphrase)
 
-    instance.take_screenshot("reports/test6")
+    screenshotsuccess = instance.take_screenshot(test_step=6)
+    if not screenshotsuccess:
+        log.append(f"[{instance.name}] Screenshot failed")
+    else:
+        log.append(f"[{instance.name}] Screenshot taken, ")
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
@@ -184,6 +202,7 @@ def test6_ppdcompile(context):
         # abandon other tests if this pdd compile fails
 
     return status, "\n".join(log)
+
 
 @register_buildtest("Build 7 - Quit to DOS")
 def test7_quitppd(context):
@@ -200,13 +219,18 @@ def test7_quitppd(context):
     instance.send_specialkeys("q", delay=0.1)
     time.sleep(0.5)
     success, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=0, stopx=160, stopy=480)
-    instance.take_screenshot("reports/test7")
+    screenshotsuccess = instance.take_screenshot(test_step=7)
+    if not screenshotsuccess:
+        log.append(f"[{instance.name}] Screenshot failed")
+    else:
+        log.append(f"[{instance.name}] Screenshot taken, ")
     log.append(f"number of ocr attempts: {attempts}")
     log.append("ocr function log:")
     log.extend(ocrlog)
     log.append("OCR text detected:")
     log.append(ocr_text)
     return success, "\n".join(log)
+
 
 #@register_buildtest("Build8 - create & mount floppy")
 def test8_mountfloppy(context):
@@ -228,6 +252,7 @@ def test8_mountfloppy(context):
 
     time.sleep(1)  # Allow QEMU to finish mounting before continuing
     return True, "\n".join(log)
+
 
 #@register_buildtest("Build9 - format floppy")
 def test9_formatfloppy(context):
@@ -274,8 +299,8 @@ def test10_copy2floppy(context):
     return True, "\n".join(log)
 
 
-@register_buildtest("Build 11 - detatch floppy")
-def test8_removefloppy(context):
+#@register_buildtest("Build 11 - detatch floppy")
+def test11_removefloppy(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
     if not instance:
@@ -291,7 +316,7 @@ def test8_removefloppy(context):
 
 
 @register_buildtest("Build 12 - take snapshot")
-def test11_takesnap(context):
+def test12_takesnap(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
     if not instance:
@@ -303,11 +328,26 @@ def test11_takesnap(context):
     log.append(output)
     return success, "\n".join(log)
 
-#@register_buildtest("Test10 - copy output from hdd img")
-def test10_copy_files(context):
+#@register_buildtest("Test13 - copy output from hdd img")
+def test13_copy_files(context):
     stdout_lines = []
     log = []
 
     success, output = copy_from_fat_image("targetd", "hdd.img")
     log.append(output)
     return success, "\n".join(log)
+
+
+@register_buildtest("Build 14 - terminate all")
+def test14_stopall(context):
+    log = []
+    print("waiting 3s before teardown")
+    time.sleep(3)
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    log.append(f"Stopping {instance_name}")
+    instance.stop()
+    log.append(f"{instance_name} has exited.")
+    if not log:
+        log.append("No QEMU instances found to stop.")
+    return True, "\n".join(log)

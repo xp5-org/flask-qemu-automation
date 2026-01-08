@@ -9,23 +9,20 @@ import time
 import subprocess
 import socket
 import tempfile
-import re
 import threading
-import datetime
 import numpy as np
 import pytesseract
-import shutil
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APPBASE_DIR = "/testrunnerapp"
+TESTSRC_BASEDIR = "/testsrc"
 
 
 class QemuInstance:
     def __init__(self, name, cpuarch, image_path, monitor_port, floppy_path=None, memory="4M"):
         self.name = name
-        self.image_path = os.path.join(BASE_DIR, image_path)
+        self.image_path = os.path.join(TESTSRC_BASEDIR, image_path)
         self.monitor_port = monitor_port
         self.memory = memory
         self.cpuarch = cpuarch
@@ -33,9 +30,9 @@ class QemuInstance:
         self.sock = None
         self.stdout_lines = []
         self.stdout_thread = None
-
+        self.screenshot_count = 0
         if floppy_path is not None:
-            self.floppy_path = os.path.join(BASE_DIR, floppy_path)
+            self.floppy_path = os.path.join(TESTSRC_BASEDIR, floppy_path)
         else:
             self.floppy_path = None    
 
@@ -82,17 +79,18 @@ class QemuInstance:
                 "-L", "pc-bios",
                 "-M", "q800",
                 "-m", "64",
-                "-drive", "id=hd0,file=/testrunnerapp/m68k/pramdisk.img,format=raw,if=none",
+                "-drive", f"id=hd0,file={TESTSRC_BASEDIR}/m68k/pramdisk.img,format=raw,if=none",
                 "-device", "scsi-hd,scsi-id=0,drive=hd0",
-                "-drive", "id=hd1,file=/testrunnerapp/m68k/maindisk.img,format=raw,if=none",
+                "-drive", f"id=hd1,file={TESTSRC_BASEDIR}/m68k/maindisk.img,format=raw,if=none",
                 "-device", "scsi-hd,scsi-id=1,drive=hd1",
-                "-drive", "id=cd0,file=/testrunnerapp/m68k/MacOS761.iso,media=cdrom,if=none",
+                "-drive", f"id=cd0,file={TESTSRC_BASEDIR}/m68k/MacOS761.iso,media=cdrom,if=none",
                 "-device", "scsi-cd,scsi-id=3,drive=cd0",
-                "-bios", "/testrunnerapp/m68k/Quadra-650.ROM",
+                "-bios", f"{TESTSRC_BASEDIR}/m68k/Quadra-650.ROM",
                 "-boot", "d",
                 "-audio", "none",
-                 "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait"
+                "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait"
             ]
+
 
 
         else:
@@ -147,34 +145,51 @@ class QemuInstance:
 
 
 
+    def take_screenshot(self, test_step=None, filename=None):
+        reports_dir = os.path.join("/testrunnerapp", "reports")
+        os.makedirs(reports_dir, exist_ok=True)
 
-    def take_screenshot(self, name="screenshot"):
-        ppm_path_abs = os.path.join(BASE_DIR, name + ".ppm")
-        png_path_abs = os.path.join(BASE_DIR, name + ".png")
-        name = name.replace(" ", "_")  # sanitize filename
+        if test_step is not None:
+            test_step = os.path.basename(str(test_step))
 
+        if filename is None:
+            if test_step is not None:
+                filename = f"screenshot-{self.name}-{test_step}-{self.screenshot_count}.png"
+            else:
+                filename = f"screenshot-{self.name}-{self.screenshot_count}.png"
+
+        ppm_path_abs = os.path.join(reports_dir, filename.replace(".png", ".ppm"))
+        png_path_abs = os.path.join(reports_dir, filename)
+        #print("DEBUG: PPMPATH: ppm_path_abs")
+        #print("DEBUG: PNGPATH: png_path_abs")
+
+        if not self.sock:
+            return False, "Monitor socket not connected"
 
         try:
-            time.sleep(0.5)
-            if not self.sock:
-                return False, "Monitor socket not connected"
-
             self.sock.sendall(f"screendump {ppm_path_abs}\n".encode("utf-8"))
-            time.sleep(0.5)
+
+            buf = b""
+            while b"(qemu)" not in buf:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    return False, "Monitor disconnected"
+                buf += chunk
 
             start = time.time()
             while not os.path.exists(ppm_path_abs):
                 if time.time() - start > 5:
                     return False, f"Timed out waiting for screendump {ppm_path_abs}"
-                time.sleep(0.1)
+                time.sleep(0.05)
 
             img = Image.open(ppm_path_abs)
             img.save(png_path_abs)
+
+            self.screenshot_count += 1
         except Exception as e:
             return False, f"Failed to take screenshot or convert image: {e}"
 
         return True, png_path_abs
-
 
 
     def _wait_for_monitor(self, timeout=10):
@@ -429,12 +444,8 @@ class QemuInstance:
 
 
 
-
-
-
-
 def ocr_word_find(instance, phrase, timeout=10, startx=None, starty=None, stopx=None, stopy=None, errorphrase=None):
-    ocrlogdir = os.path.join(BASE_DIR, "compile_logs")
+    ocrlogdir = os.path.join(TESTSRC_BASEDIR, "compile_logs")
     os.makedirs(ocrlogdir, exist_ok=True)
     log = []
 
@@ -501,19 +512,8 @@ def ocr_word_find(instance, phrase, timeout=10, startx=None, starty=None, stopx=
     return False, text, attempts, log
 
 
-
-
-
-
-
-
-
-
-
-
-
 def make_floppy_image(filename):
-    absfloppypath = os.path.join(BASE_DIR, filename)
+    absfloppypath = os.path.join(TESTSRC_BASEDIR, filename)
     size = 1474560  # 1.44 MB
     if not os.path.exists(absfloppypath):
         with open(absfloppypath, "wb") as f:
@@ -526,11 +526,9 @@ def make_floppy_image(filename):
         return True, "Floppy image already exists with correct size"
 
 
-
-
 def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
-    hddimg_abspath = os.path.join(BASE_DIR, hdd_img_input)
-    qcow2_abspath = os.path.join(BASE_DIR, qcow2_output)
+    hddimg_abspath = os.path.join(TESTSRC_BASEDIR, hdd_img_input)
+    qcow2_abspath = os.path.join(TESTSRC_BASEDIR, qcow2_output)
     if not os.path.isfile(hddimg_abspath):
         return False, f"[error] Raw image not found: {hddimg_abspath}"
 
@@ -551,12 +549,10 @@ def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
         output = e.stdout.decode("utf-8", errors="replace") if e.stdout else ''
         return False, output
 
-    
-
 
 def copy_to_fat_image(src_dir, hdd_img_path):
-    srcdir_abspath = os.path.join(BASE_DIR, src_dir)
-    hddimg_abspath = os.path.join(BASE_DIR, hdd_img_path)
+    srcdir_abspath = os.path.join(TESTSRC_BASEDIR, src_dir)
+    hddimg_abspath = os.path.join(TESTSRC_BASEDIR, hdd_img_path)
     print("src abs path: ", srcdir_abspath)
     print("hdd abs path: ", hddimg_abspath)
     log = []
@@ -615,10 +611,6 @@ def copy_from_fat_image(dst_dir, image_path):
         os.unlink(config_path)
 
 
-
-
-
-
 def find_button_in_screenshot(button_path, screenshot_path):
     # load both images as grayscale
     full_img = Image.open(screenshot_path).convert("L")
@@ -647,11 +639,7 @@ def find_button_in_screenshot(button_path, screenshot_path):
     return False, "Button not found"
 
 
-
-
-
-
-def ppdcompile(sock):
+def ppdcompile(sock):   
     log_dir = "./compile_logs"
     os.makedirs(log_dir, exist_ok=True)
 
