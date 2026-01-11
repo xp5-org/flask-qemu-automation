@@ -35,6 +35,7 @@ def test1_copy_files(context):
     log.append(output)
     return success, "\n".join(log)
 
+
 @register_buildtest("Build 2 - convert hdd.img to 4xhdd1-4.qcow2")
 def test2_diskconv(context):
     stdout_lines = []
@@ -53,18 +54,19 @@ def test2_diskconv(context):
 def test3_start_multiple_qemu(context):
     base_port = 55555
     count = 4
-
+    name = "qemu0"
+    cpuarch = "i386"
     log = []
     context["qemu_instances"] = []
 
     for i in range(1, count + 1):
         name = f"qemu{i}"
         port = base_port + i - 1
-        image_path = f"4xhdd{i}.qcow2"  # distinct image per instance
+        image_path = f"4xhdd{i}.qcow2"
         log.append(f"Starting {name} on port {port} with image={image_path}")
-        instance = QemuInstance(name, image_path, port)
+        instance = QemuInstance(name, cpuarch, image_path, port)
         started = instance.start()
-        context[name] = instance  # Add this line inside your for-loop
+        context[name] = instance
         if not started:
             success, logs_or_msg = instance.collect_qemu_logs(f"reports/{name}_stdout.log")
             log.append(f"Failed to start {name}.")
@@ -72,7 +74,7 @@ def test3_start_multiple_qemu(context):
             context["abort"] = True
             return False, "\n".join(log)
 
-        time.sleep(1)  # wait a bit before checking readiness
+        time.sleep(1)
 
         if not instance.wait_for_ready():
             log.append(f"{name} did not become ready.")
@@ -88,6 +90,20 @@ def test3_start_multiple_qemu(context):
 
 
 
+@register_buildtest("Build 4 - Send text to console")
+def test5_startppd(context):
+    log = []
+
+    qemu_instances = [inst for inst in context.values() if hasattr(inst, "send_keyboardstring")]
+
+    if not qemu_instances:
+        return True, "No QEMU instances found"
+
+    for instance in qemu_instances:
+        log.append(f"Sending text to {instance.name}")
+        instance.send_keyboardstring(f"My instance.name is: {instance.name}")
+
+    return True, "\n".join(log)
 
 
 
@@ -112,12 +128,16 @@ def test5_bootdos(context):
         stopx=160,
         stopy=480
     )
+    instance_names = ["qemu1", "qemu2", "qemu3", "qemu4"]
 
-    ok, msg = instance.take_screenshot("reports/test4")
-    if not ok:
-        log.append(f"[{instance.name}] Screenshot failed: {msg}")
-    else:
-        log.append(f"[{instance.name}] Screenshot taken: {msg}")
+    for name in instance_names:
+        instance = context.get(name)
+        success = instance.take_screenshot(test_step=4)
+        if not success:
+            log.append(f"[{instance.name}] Screenshot failed")
+        else:
+            log.append(f"[{instance.name}] Screenshot taken")
+
 
     log.append("Checked DOS prompt")
     log.append(f"number of ocr attempts: {attempts}")
@@ -133,27 +153,22 @@ def test5_bootdos(context):
 
 
 
-@register_buildtest("Build 5 - send test text")
-def test5_startppd(context):
-    instance_name = "qemu1"  
-    instance = context.get(instance_name)
-    if not instance:
-        return False, f"No QEMU instance '{instance_name}' available in context"
-    stdout_lines = []
+@register_buildtest("Build 14 - terminate all")
+def test14_stopall(context):
     log = []
+    print("waiting 3s before teardown")
+    time.sleep(3)
 
-    searchphrase = "HI-TECH"
-    instance.send_keyboardstring("cd pacific\n")
-    log.append("cd pacific")
-    instance.send_keyboardstring("cd bin\n")
-    log.append("cd bin")
-    instance.send_keyboardstring("ppd c:\\src\\bartest.c \n")
-    success, ocr_text, attempts, ocrlog = ocr_word_find(instance, searchphrase, timeout=10, startx=0, starty=315, stopx=640, stopy=480)
-    instance.take_screenshot("reports/test5")
-    log.append("PPD Starting test")
-    log.append(f"number of ocr attempts: {attempts}")
-    log.append(ocr_text)
-    log.append("ocr function log:")
-    log.extend(ocrlog)
-    return success, "\n".join(log)
+    qemu_instances = [inst for inst in context.values() if hasattr(inst, "stop")]
+
+    if not qemu_instances:
+        log.append("No QEMU instances found to stop.")
+        return True, "\n".join(log)
+
+    for inst in qemu_instances:
+        log.append(f"Stopping {inst.name}")
+        inst.stop()
+        log.append(f"{inst.name} has exited.")
+
+    return True, "\n".join(log)
 

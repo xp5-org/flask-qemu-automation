@@ -328,6 +328,7 @@ def test12_takesnap(context):
     log.append(output)
     return success, "\n".join(log)
 
+
 #@register_buildtest("Test13 - copy output from hdd img")
 def test13_copy_files(context):
     stdout_lines = []

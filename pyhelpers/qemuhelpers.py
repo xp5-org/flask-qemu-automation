@@ -19,7 +19,9 @@ APPBASE_DIR = "/testrunnerapp"
 TESTSRC_BASEDIR = "/testsrc"
 
 
+
 class QemuInstance:
+    lock = threading.Lock()  # shared per-instance
     def __init__(self, name, cpuarch, image_path, monitor_port, floppy_path=None, memory="4M"):
         self.name = name
         self.image_path = os.path.join(TESTSRC_BASEDIR, image_path)
@@ -52,12 +54,13 @@ class QemuInstance:
                 time.sleep(0.3)
         self.stdout_lines.append(f"Timeout waiting for QEMU monitor on port {self.monitor_port}")
         return False
-    
+
 
     def _read_stdout(self):
         if self.process and self.process.stdout:
             for line in self.process.stdout:
                 self.stdout_lines.append(line.strip())
+
 
     def start(self):
         print('disk path: ', self.image_path)
@@ -144,7 +147,6 @@ class QemuInstance:
         return True
 
 
-
     def take_screenshot(self, test_step=None, filename=None):
         reports_dir = os.path.join("/testrunnerapp", "reports")
         os.makedirs(reports_dir, exist_ok=True)
@@ -207,7 +209,6 @@ class QemuInstance:
         print(f"[{self.name}] Monitor timeout on port {self.monitor_port}")
         return False
 
-    lock = threading.Lock()  # shared per-instance
 
     def send_key(self, keyname, ctrl=False, alt=False, shift=False, delay=0.1):
         if not self.sock:
@@ -309,7 +310,8 @@ class QemuInstance:
                     break
 
             return data.strip()
-        
+
+
     def send_mouse_pos(self, x, y, dz=None):
         if not self.sock:
             return False, "Monitor socket not connected"
@@ -334,9 +336,6 @@ class QemuInstance:
             except Exception as e:
                 return False, f"Failed to write QEMU logs to {save_path}: {e}"
         return True, logs
-
-
-
 
 
     def take_screenshots_to_gif(self, interval, count, gif_name="screencap.gif", base_name="frame"):
@@ -393,8 +392,6 @@ class QemuInstance:
             return False, f"[{self.name}] GIF screenshot capture failed: {e}"
 
 
-
-
     def attach_floppy(self, path):
         if not os.path.exists(path):
             return False, f"[{self.name}] Floppy image not found: {path}"
@@ -405,6 +402,7 @@ class QemuInstance:
         if "could not" in response.lower() or "error" in response.lower():
             return False, f"[{self.name}] Failed to attach floppy: {response.strip()}"
         return True, f"[{self.name}] Floppy attached successfully."
+
 
     def detatch_floppy(self):
         response = self.send_command("eject floppy0")
@@ -430,10 +428,6 @@ class QemuInstance:
         return True, f"[{self.name}] Snapshot '{name}' loaded successfully."
 
 
-
-        
-
-
     def stop(self):
         if self.process:
             self.process.terminate()
@@ -441,6 +435,74 @@ class QemuInstance:
             self.sock.close()
             self.process = None
             self.sock = None
+
+
+class MouseAction:
+    @staticmethod
+    def closedialogbutton(instance, test_step):
+        button_path = "/testsrc/buttontest/finder_window_closebutton.png"
+        offset_x=-150
+        offset_y=-190
+        if not instance:
+            return False, "No instance provided"
+
+        log = []
+
+        ok, screenshot_path = instance.take_screenshot(test_step)
+        if not ok:
+            log.append(f"[{instance.name}] Screenshot failed: {screenshot_path}")
+            return False, "\n".join(log)
+
+        log.append(f"[{instance.name}] Screenshot taken: {screenshot_path}")
+
+        success, pos = find_button_in_screenshot(button_path, screenshot_path)
+        if success:
+            x, y = pos
+            log.append(f"Button found at {pos}")
+            instance.send_mouse_pos(offset_x, offset_y) # send mouse to corner 0,0 
+            instance.send_mouse_pos(offset_x, offset_y)
+            time.sleep(2)
+            instance.send_mouse_pos(x, y)
+            ok, screenshot_path = instance.take_screenshot(test_step)
+        else:
+            log.append("Button not found")
+
+        return success, "\n".join(log)
+    
+
+    def findandclicktitlebar(instance, test_step):
+        
+        button_path = "/testsrc/buttontest/inactive_titlebar_system7.png"
+        offset_x=-150
+        offset_y=-190
+        if not instance:
+            return False, "No instance provided"
+
+        log = []
+
+        ok, screenshot_path = instance.take_screenshot(test_step)
+        if not ok:
+            log.append(f"[{instance.name}] Screenshot failed: {screenshot_path}")
+            return False, "\n".join(log)
+
+        log.append(f"[{instance.name}] Screenshot taken: {screenshot_path}")
+
+        success, pos = find_button_in_screenshot(button_path, screenshot_path)
+        if success:
+            x, y = pos
+            log.append(f"Button found at {pos}")
+
+            instance.send_mouse_pos(offset_x, offset_y)
+            instance.send_mouse_pos(offset_x, offset_y)
+            time.sleep(2)
+            instance.send_mouse_pos(x, y)
+            # debug , 2nd screenshot to confirm the mouseclick
+            ok, screenshot_path = instance.take_screenshot(test_step)
+        else:
+            log.append("Button not found")
+
+        return success, "\n".join(log)
+
 
 
 

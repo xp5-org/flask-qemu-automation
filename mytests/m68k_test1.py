@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
 TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
 TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
@@ -10,14 +11,12 @@ if TESTSRC_HELPERDIR  not in sys.path:
     sys.path.insert(0, TESTSRC_HELPERDIR )
 
 from apphelpers import register_buildtest, register_testfile
-from qemuhelpers import find_button_in_screenshot, copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
-from qemuhelpers import QemuInstance  # adjust path if needed
-import time
+from qemuhelpers import ocr_word_find
+from qemuhelpers import QemuInstance
+from qemuhelpers import MouseAction
+
 
 testfailstatus = 0
-
-
-
 
 register_testfile(
     id="m68k mac",
@@ -25,12 +24,6 @@ register_testfile(
     system="qemu",
     platform="mac m68k", # this makes new webpage category
 )(sys.modules[__name__])
-
-
-
-
-
-
 
 @register_buildtest("Build 1 - Start QEMU using class")
 def test1_start_qemu(context):
@@ -71,8 +64,6 @@ def test1_start_qemu(context):
     return True, "\n".join(log)
 
 
-
-
 @register_buildtest("Build 2 - Boot to System7")
 def test2_bootdos(context):
     instance_name = "qemu1" 
@@ -94,8 +85,8 @@ def test2_bootdos(context):
         stopy=480
     )
 
-    ok, msg = instance.take_screenshot("reports/test4")
-    if not ok:
+    success, msg = instance.take_screenshot(test_step=2)
+    if not success:
         log.append(f"[{instance.name}] Screenshot failed: {msg}")
     else:
         log.append(f"[{instance.name}] Screenshot taken: {msg}")
@@ -112,69 +103,38 @@ def test2_bootdos(context):
 
 @register_buildtest("Build 3 - find mac close box window by image match")
 def test3_startmac(context):
-    instance_name = "qemu1"  
+    instance_name = "qemu1"
     instance = context.get(instance_name)
-    button_path = "/testrunnerapp/buttontest/finder_window_closebutton.png"
-    if not instance:
-        return False, f"No QEMU instance '{instance_name}' available in context"
-    stdout_lines = []
-    log = []
 
-    ok, screenshot_path = instance.take_screenshot("reports/test3")
-    if not ok:
-        log.append(f"[{instance.name}] Screenshot failed: {screenshot_path}")
-        success = False
-    else:
-        log.append(f"[{instance.name}] Screenshot taken: {screenshot_path}")
-        success, pos = find_button_in_screenshot(button_path, screenshot_path)
-        if success:
-            print("Button found at:", pos)
-            log.append(f"Button found at {pos}")
-            x, y = pos
-            ok, msg = instance.send_mouse_pos(x, y)
-            ok, screenshot_path = instance.take_screenshot("reports/test3")
-        else:
-            print("Button not found")
-            log.append("Button not found")
-
+    success, log = MouseAction.closedialogbutton(instance, test_step=3)
     if not success:
         context["abort"] = True
 
-    return success, "\n".join(log)
-
+    return success, log
 
 
 @register_buildtest("Build 4 - find mac title bar window by image match")
 def test4_mac(context):
-    instance_name = "qemu1"  
+    instance_name = "qemu1"
     instance = context.get(instance_name)
-    button_path = "/testrunnerapp/buttontest/inactive_titlebar_system7.png"
-    if not instance:
-        return False, f"No QEMU instance '{instance_name}' available in context"
-    stdout_lines = []
-    log = []
 
-    ok, screenshot_path = instance.take_screenshot("reports/test4")
-    if not ok:
-        log.append(f"[{instance.name}] Screenshot failed: {screenshot_path}")
-        success = False
-    else:
-        log.append(f"[{instance.name}] Screenshot taken: {screenshot_path}")
-        success, pos = find_button_in_screenshot(button_path, screenshot_path)
-        if success:
-            print("Button found at:", pos)
-            log.append(f"Button found at {pos}")
-            x, y = pos
-            ok, msg = instance.send_mouse_pos(-150, -190)
-            ok, msg = instance.send_mouse_pos(-150, -190)
-            time.sleep(2)
-            ok, msg = instance.send_mouse_pos(x, y)
-            ok, screenshot_path = instance.take_screenshot("reports/test4")
-        else:
-            print("Button not found")
-            log.append("Button not found")
-
+    success, log = MouseAction.findandclicktitlebar(instance, test_step=4)
     if not success:
         context["abort"] = True
 
-    return success, "\n".join(log)
+    return success, log
+
+
+@register_buildtest("Build 6 - terminate all")
+def test6_stopall(context):
+    log = []
+    print("waiting 3s before teardown")
+    time.sleep(3)
+    instance_name = "qemu1"  
+    instance = context.get(instance_name)
+    log.append(f"Stopping {instance_name}")
+    instance.stop()
+    log.append(f"{instance_name} has exited.")
+    if not log:
+        log.append("No QEMU instances found to stop.")
+    return True, "\n".join(log)
