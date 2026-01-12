@@ -11,10 +11,9 @@ if TESTSRC_HELPERDIR  not in sys.path:
 
 from apphelpers import register_buildtest, register_testfile
 from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
-from qemuhelpers import QemuInstance  # adjust path if needed
+from qemuhelpers import QemuInstance
 import time
 
-testfailstatus = 0
 
 
 
@@ -132,7 +131,7 @@ def test5_bootdos(context):
 
     for name in instance_names:
         instance = context.get(name)
-        success = instance.take_screenshot(test_step=4)
+        success = instance.take_screenshot(test_step=5)
         if not success:
             log.append(f"[{instance.name}] Screenshot failed")
         else:

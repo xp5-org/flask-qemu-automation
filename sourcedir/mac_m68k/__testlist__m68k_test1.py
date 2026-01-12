@@ -2,7 +2,7 @@ import sys
 import os
 import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
-TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
+#TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
 TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
 TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
 
@@ -16,7 +16,7 @@ from qemuhelpers import QemuInstance
 from qemuhelpers import MouseAction
 
 
-testfailstatus = 0
+#testfailstatus = 0
 
 register_testfile(
     id="m68k mac",

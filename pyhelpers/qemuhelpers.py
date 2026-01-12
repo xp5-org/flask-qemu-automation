@@ -613,6 +613,7 @@ def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
 
 
 def copy_to_fat_image(src_dir, hdd_img_path):
+    # copies a dir to the hdd image
     srcdir_abspath = os.path.join(TESTSRC_BASEDIR, src_dir)
     hddimg_abspath = os.path.join(TESTSRC_BASEDIR, hdd_img_path)
     print("src abs path: ", srcdir_abspath)

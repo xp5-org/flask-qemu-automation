@@ -2,8 +2,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
 # need to replace this path stuff with a config file
-TESTSRC_TESTLISTDIR = "/testsrc/mytests"    # individual test-cases
-TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
+TESTSRC_BASEDIR = "/testsrc/sourcedir/pacific_c"                # root dir of git repo vice-specific test src
 TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
 
 # make app helpers dir visible
@@ -12,12 +11,10 @@ if TESTSRC_HELPERDIR  not in sys.path:
 
 from apphelpers import register_buildtest, register_testfile
 from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
-from qemuhelpers import QemuInstance  # adjust path if needed
+from qemuhelpers import QemuInstance
 import time
 
-testfailstatus = 0
-
-
+#testfailstatus = 0
 
 
 register_testfile(
@@ -28,14 +25,13 @@ register_testfile(
 )(sys.modules[__name__])
 
 
-TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
-TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
+
 
 
 @register_buildtest("Build 1 - Copy files to hdd.img")
 def test1_copy_files(context):
     log = []
-    success, output = copy_to_fat_image("sourced", TESTSRC_BASEDIR + "/hdd.img")
+    success, output = copy_to_fat_image(TESTSRC_BASEDIR + "/sourced", TESTSRC_BASEDIR + "/hdd.img")
     log.append(output)
     if not success:
         context["abort"] = True
