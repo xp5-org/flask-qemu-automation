@@ -16,7 +16,7 @@ from qemuhelpers import QemuInstance
 from qemuhelpers import MouseAction
 
 
-#testfailstatus = 0
+
 
 register_testfile(
     id="m68k mac",

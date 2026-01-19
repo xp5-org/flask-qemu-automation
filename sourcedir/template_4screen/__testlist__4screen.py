@@ -17,7 +17,6 @@ import time
 
 
 
-
 register_testfile(
     id="Debug Fourscreens",
     types=["build"],

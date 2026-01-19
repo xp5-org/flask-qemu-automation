@@ -2,7 +2,9 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #auto import /testsrc/mytests dir as modules
 # need to replace this path stuff with a config file
-TESTSRC_BASEDIR = "/testsrc/sourcedir/pacific_c"                # root dir of git repo vice-specific test src
+# TESTSRC_BASEDIR = "/testsrc/sourcedir/pacific_c"        # root dir of git repo vice-specific test src
+# TESTSRC_HELPERDIR = "/testsrc/pyhelpers"                # vicehelpers.py lives here
+TESTSRC_BASEDIR = "/testsrc"                # root dir of git repo vice-specific test src
 TESTSRC_HELPERDIR = "/testsrc/pyhelpers"    # vicehelpers.py lives here
 
 # make app helpers dir visible
@@ -10,11 +12,10 @@ if TESTSRC_HELPERDIR  not in sys.path:
     sys.path.insert(0, TESTSRC_HELPERDIR )
 
 from apphelpers import register_buildtest, register_testfile
-from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_floppy_image
+from qemuhelpers import copy_to_fat_image, copy_from_fat_image, ocr_word_find, ppdcompile, convert_raw_to_qcow2, make_disk_image
 from qemuhelpers import QemuInstance
 import time
 
-#testfailstatus = 0
 
 
 register_testfile(
@@ -27,11 +28,22 @@ register_testfile(
 
 
 
+progname = "pacific_c"
+archtype = 'i386'
+src_dir = '/testsrc/sourcedir/' + progname
+out_dir = src_dir + "/output"
+config = src_dir + "/vice_nosound.cfg"
+sourcecode_dir = src_dir + "/sourced"
+hdd_img_path = src_dir + "/" + "hdd.img"
+hdd_qcow_path = src_dir + "/" + "hdd.qcow2"
+floppy_path = src_dir + "/" + "newfloppy.img"
+floppy1_size = "1440K"
+
 
 @register_buildtest("Build 1 - Copy files to hdd.img")
 def test1_copy_files(context):
     log = []
-    success, output = copy_to_fat_image(TESTSRC_BASEDIR + "/sourced", TESTSRC_BASEDIR + "/hdd.img")
+    success, output = copy_to_fat_image(sourcecode_dir, hdd_img_path)
     log.append(output)
     if not success:
         context["abort"] = True
@@ -42,7 +54,7 @@ def test1_copy_files(context):
 @register_buildtest("Build 2 - convert hdd.img to hdd.qcow2")
 def test2_diskconv(context):
     log = []
-    success, output = convert_raw_to_qcow2(TESTSRC_BASEDIR + "/hdd.img", TESTSRC_BASEDIR + "/hdd.qcow2")
+    success, output = convert_raw_to_qcow2(hdd_img_path, hdd_qcow_path)
     log.append(output)
     if not success:
         context["abort"] = True
@@ -55,12 +67,12 @@ def test3_start_qemu(context):
     name = "qemu0"
     cpuarch = "i386"
     port = 55555
-    image_path = (TESTSRC_BASEDIR + "/hdd.qcow2")
-    #floppy_path = "tmpfloppydisk.img"
+    make_disk_image(floppy_path, floppy1_size)
 
-    log = [f"Starting {name} on port {port} with image={image_path}"]
+    log = [f"Starting {name} on port {port} with image={hdd_qcow_path}"]
 
-    instance = QemuInstance(name, cpuarch, image_path, port)
+    instance = QemuInstance(name, cpuarch, port, hdd1imagepath=hdd_qcow_path, floppy_path=floppy_path)
+
 
     # Give QEMU some time to initialize and generate output
     time.sleep(3)
@@ -228,29 +240,29 @@ def test7_quitppd(context):
     return success, "\n".join(log)
 
 
-#@register_buildtest("Build8 - create & mount floppy")
-def test8_mountfloppy(context):
+@register_buildtest("Build 8 - run prog")
+def test5_startppd(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
     if not instance:
         return False, f"No QEMU instance '{instance_name}' available in context"
-
+    stdout_lines = []
     log = []
-    floppyimage = "tmpfloppydisk.img"
 
-    make_floppy_image(floppyimage)
+    searchphrase = "HI-TECH"
+    instance.send_keyboardstring("cd c:\src\n")
+    log.append("cd bartest")
+    instance.send_keyboardstring("bartest\n")
+    log.append("test prog")
+    time.sleep(5)
+    instance.take_screenshot(test_step=8)
+    instance.send_keyboardstring("\n")
+    instance.send_keyboardstring("\n")
+    return "\n".join(log)
 
-    success, output = QemuInstance.attach_floppy()
-    log.append(output)
-    if not success:
-        print('Error attaching floppy disk image: ', floppyimage)
-        return False, "\n".join(log)
-
-    time.sleep(1)  # Allow QEMU to finish mounting before continuing
-    return True, "\n".join(log)
 
 
-#@register_buildtest("Build9 - format floppy")
+@register_buildtest("Build9 - format floppy")
 def test9_formatfloppy(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
@@ -258,10 +270,8 @@ def test9_formatfloppy(context):
         return False, f"No QEMU instance '{instance_name}' available in context"
 
     log = []
-
-    instance.send_keyboardstring("format a: /q /s \n")
-    time.sleep(2)
-    instance.send_keyboardstring("\n")
+    diskname = "test1"
+    instance.send_keyboardstring(f"format a: /V:{diskname} /U\n")
     time.sleep(3)
     instance.send_keyboardstring("\n")
     time.sleep(3)
@@ -276,7 +286,7 @@ def test9_formatfloppy(context):
     return True, "\n".join(log)
 
 
-#@register_buildtest("Test10 - copy to floppy")
+@register_buildtest("Test10 - copy to floppy")
 def test10_copy2floppy(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
@@ -285,17 +295,16 @@ def test10_copy2floppy(context):
 
     log = []
 
-    success, output = instance.send_keyboardstring("copy c:\\src\\*.* a:\\\n")
-    log.append(output)
-    success = True # fake it
-    if not success:
-        return False, "\n".join(log)
+    instance.send_keyboardstring("copy c:\\src\\*.* a:\\\n")
+    time.sleep(5)
+    log.append("copied files")
 
-    time.sleep(3) # replace this with OCR
+
     return True, "\n".join(log)
 
 
-#@register_buildtest("Build 11 - detatch floppy")
+
+@register_buildtest("Build 11 - detatch floppy")
 def test11_removefloppy(context):
     instance_name = "qemu1"  
     instance = context.get(instance_name)
@@ -325,12 +334,12 @@ def test12_takesnap(context):
     return success, "\n".join(log)
 
 
-#@register_buildtest("Test13 - copy output from hdd img")
+@register_buildtest("Test13 - copy output from hdd img")
 def test13_copy_files(context):
     stdout_lines = []
     log = []
 
-    success, output = copy_from_fat_image("targetd", "hdd.img")
+    success, output = copy_from_fat_image(out_dir, hdd_img_path)
     log.append(output)
     return success, "\n".join(log)
 

@@ -21,22 +21,25 @@ TESTSRC_BASEDIR = "/testsrc"
 
 
 class QemuInstance:
-    lock = threading.Lock()  # shared per-instance
-    def __init__(self, name, cpuarch, image_path, monitor_port, floppy_path=None, memory="4M"):
+    lock = threading.Lock()
+    def __init__(self, name, cpuarch, monitor_port, hdd1imagepath=None, hdd2imagepath=None, hdd3imagepath=None, hdd4imagepath=None, floppy_path=None, memory="4M"):
         self.name = name
-        self.image_path = os.path.join(TESTSRC_BASEDIR, image_path)
+        self.cpuarch = cpuarch
         self.monitor_port = monitor_port
         self.memory = memory
-        self.cpuarch = cpuarch
         self.process = None
         self.sock = None
         self.stdout_lines = []
         self.stdout_thread = None
         self.screenshot_count = 0
+        self.hdd1imagepath = hdd1imagepath
+        self.hdd2imagepath = hdd2imagepath
+        self.hdd3imagepath = hdd3imagepath
+        self.hdd4imagepath = hdd4imagepath
         if floppy_path is not None:
             self.floppy_path = os.path.join(TESTSRC_BASEDIR, floppy_path)
         else:
-            self.floppy_path = None    
+            self.floppy_path = None
 
 
     def wait_for_ready(self, timeout=10):
@@ -63,18 +66,25 @@ class QemuInstance:
 
 
     def start(self):
-        print('disk path: ', self.image_path)
         env = os.environ.copy()
         if self.cpuarch == "i386":
             args = [
                 "qemu-system-i386",
-                "-hda", self.image_path,
                 "-m", str(self.memory),
                 "-monitor", f"tcp:127.0.0.1:{self.monitor_port},server,nowait",
                 "-vga", "std"
             ]
             if self.floppy_path:
                 args.extend(["-fda", self.floppy_path])
+            if self.hdd1imagepath:
+                args.extend(["-hda", self.hdd1imagepath])
+            if self.hdd2imagepath:
+                args.extend(["-hdb", self.hdd2imagepath])
+            if self.hdd3imagepath:
+                args.extend(["-hdc", self.hdd3imagepath])
+            if self.hdd4imagepath:
+                args.extend(["-hdd", self.hdd4imagepath])
+                
 
         elif self.cpuarch == "m68k":
             args = [
@@ -574,25 +584,23 @@ def ocr_word_find(instance, phrase, timeout=10, startx=None, starty=None, stopx=
     return False, text, attempts, log
 
 
-def make_floppy_image(filename):
-    absfloppypath = os.path.join(TESTSRC_BASEDIR, filename)
-    size = 1474560  # 1.44 MB
-    if not os.path.exists(absfloppypath):
-        with open(absfloppypath, "wb") as f:
-            f.write(b"\x00" * size)
-        return True, "Created new 1.44MB floppy image"
+def make_disk_image(floppypath, size):
+    if not os.path.exists(floppypath):
+        subprocess.check_call([
+            "qemu-img",
+            "create",
+            floppypath,
+            size
+        ])
+        return True, f"Created new floppy image of size {size}"
     else:
-        actual_size = os.path.getsize(absfloppypath)
-        if actual_size != size:
-            return False, f"Floppy image exists but is {actual_size} bytes, expected 1474560"
         return True, "Floppy image already exists with correct size"
 
 
-def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
-    hddimg_abspath = os.path.join(TESTSRC_BASEDIR, hdd_img_input)
-    qcow2_abspath = os.path.join(TESTSRC_BASEDIR, qcow2_output)
-    if not os.path.isfile(hddimg_abspath):
-        return False, f"[error] Raw image not found: {hddimg_abspath}"
+
+def convert_raw_to_qcow2(hdd_img_path, qcow2_output):
+    if not os.path.isfile(hdd_img_path):
+        return False, f"[error] Raw image not found: {hdd_img_path}"
 
     if qcow2_output is None:
         qcow2_output = os.path.splitext(qcow2_output)[0] + ".qcow2"
@@ -600,7 +608,7 @@ def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
 
     try:
         result = subprocess.run(
-            ["qemu-img", "convert", "-O", "qcow2", hddimg_abspath, qcow2_abspath],
+            ["qemu-img", "convert", "-O", "qcow2", hdd_img_path, qcow2_output],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -613,13 +621,8 @@ def convert_raw_to_qcow2(hdd_img_input, qcow2_output):
 
 
 def copy_to_fat_image(src_dir, hdd_img_path):
-    # copies a dir to the hdd image
-    srcdir_abspath = os.path.join(TESTSRC_BASEDIR, src_dir)
-    hddimg_abspath = os.path.join(TESTSRC_BASEDIR, hdd_img_path)
-    print("src abs path: ", srcdir_abspath)
-    print("hdd abs path: ", hddimg_abspath)
     log = []
-    mtools_config = f'drive h: file="{hddimg_abspath}" offset=32256\n'
+    mtools_config = f'drive h: file="{hdd_img_path}" offset=32256\n'
     with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
         tmp.write(mtools_config)
         config_path = tmp.name
@@ -627,7 +630,7 @@ def copy_to_fat_image(src_dir, hdd_img_path):
     try:
         try:
             result = subprocess.run(
-                f'MTOOLSRC={config_path} mcopy -n -o -s {srcdir_abspath}/* h:/src/',
+                f'MTOOLSRC={config_path} mcopy -n -o -s {src_dir}/* h:/src/',
                 shell=True,
                 check=True,
                 executable="/bin/bash",

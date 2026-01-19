@@ -1,79 +1,71 @@
 #include <dos.h>
 #include <conio.h>
-#include <stdio.h>
-#include <stdlib.h> 
-#define screenwidth 640
-#define screenheight 480
+#include <stdlib.h>
+#include <string.h>
 
-void setVideoMode(unsigned char mode) {
-    union REGS inregs, outregs;
-    inregs.h.ah = 0x00;
-    inregs.h.al = mode;
-    int86(0x10, &inregs, &outregs);
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 200
+#ifndef MK_FP
+#define MK_FP(seg, off) ((void far *)(((unsigned long)(seg) << 16) | (unsigned int)(off)))
+#endif
+
+void set_mode(int mode) {
+    union REGS regs;
+    regs.h.ah = 0x00;
+    regs.h.al = (unsigned char)mode;
+    int86(0x10, &regs, &regs);
 }
 
-void setPixel(int x, int y, unsigned char color) {
-    union REGS inregs, outregs;
-    inregs.h.ah = 0x0C;
-    inregs.h.al = color;
-    inregs.x.cx = x;
-    inregs.x.dx = y;
-    int86(0x10, &inregs, &outregs);
+void wait_ms(unsigned int ms) {
+    union REGS regs;
+    unsigned long us = (unsigned long)ms * 1000L;
+    regs.h.ah = 0x86;
+    regs.x.cx = (unsigned int)(us >> 16);
+    regs.x.dx = (unsigned int)(us & 0xFFFF);
+    int86(0x15, &regs, &regs);
 }
 
-int *generateRandomBars(int n) {
-int i;
-
-    static int barHeights[320]; 
-    for (i = 0; i < n; i++) {
-        barHeights[i] = rand() % screenheight - 10; // Random height between 1 and MAX_HEIGHT
+void clear_screen() {
+    unsigned int i;
+    unsigned char far *ptr = (unsigned char far *)MK_FP(0xA000, 0);
+    for (i = 0; i < 32000U; i++) {
+        ptr[i] = 0;
+        ptr[i + 32000U] = 0;
     }
-    
-    return barHeights;
 }
 
-void drawBarsFromArray(int *barHeights, int numBars) {
-    unsigned char color;
-    int y, x, i;
+void draw_bars(int num_bars) {
+    int i, row;
+    int bar_width = SCREEN_WIDTH / num_bars;
+    unsigned char far *vga = (unsigned char far *)MK_FP(0xA000, 0);
 
-    for (x = 0; x < numBars; x++) {
-        int barHeight = barHeights[x];
-        int barWidth = screenwidth / numBars;
-        int startX = x * barWidth; // Calculate the starting position of the current bar
-        color = rand() % 256;
-        for (y = screenheight - barHeight; y < screenheight; y++) {
-            for (i = 0; i < barWidth; i++) {
-                //color = rand() % 256; // Random color for each pixel of the bar
-                setPixel(startX + i, y, color); // Corrected calculation for x-coordinate
+    for (i = 0; i < num_bars; i++) {
+        int height = rand() % (SCREEN_HEIGHT - 20) + 10;
+        unsigned char color = (unsigned char)(i + 32);
+        int x_offset = i * bar_width;
+        unsigned char far *dest = vga + x_offset + (SCREEN_HEIGHT - height) * 320;
+
+        for (row = 0; row < height; row++) {
+            int col;
+            for (col = 0; col < bar_width; col++) {
+                dest[col] = color;
             }
+            dest += 320;
         }
     }
 }
 
-#include <conio.h> // Include conio.h for getch()
+
 
 int main() {
-    int *barHeights;
-    int numBars = 10; 
+    set_mode(0x13);
 
-    // Infinite loop until any key is pressed
     while (!kbhit()) {
-        barHeights = generateRandomBars(numBars);
-
-        setVideoMode(0x12); // Set Mode 12h 640x480
-
-        drawBarsFromArray(barHeights, numBars);
-
-        // Wait for a key press or continue looping
-        if (kbhit()) break; // Break out of the loop if a key is pressed
-
-        // Clean up
-        free(barHeights);
-        setVideoMode(0x03); // Set text mode
+        clear_screen();
+        draw_bars(80);
+        wait_ms(500);
     }
 
-    // Clean up before exiting
-    setVideoMode(0x03); // Set text mode
+    set_mode(0x03);
     return 0;
 }
-
