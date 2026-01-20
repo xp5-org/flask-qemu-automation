@@ -2,6 +2,12 @@ FROM ubuntu:25.04
 ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
+# build with 1/2 cpu cores unless specified in build arg
+ARG COMPILERCORES
+RUN CORES=${COMPILERCORES:-$(nproc)} && \
+    CORES=$((CORES / 2)) && \
+    if [ "$CORES" -lt 1 ]; then CORES=1; fi
+
 # Update and install dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -41,7 +47,9 @@ RUN apt-get update && \
         git \
         vim \
         python3-venv \
-        mtools 
+        mtools \
+        xdotool \
+        imagemagik
 
 RUN apt-get build-dep -y qemu-system-misc ninja || true
 RUN apt-get remove -y light-locker xscreensaver
@@ -64,17 +72,18 @@ RUN mkdir -p /var/run/dbus && \
 ENV VENV_PATH=/opt/venv
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-WORKDIR /app
-
 # build m68k from src
+WORKDIR /tmp
 RUN git clone https://gitlab.com/qemu-project/qemu.git && \
 cd qemu && \
 ./configure --target-list=m68k-softmmu --enable-gtk --enable-sdl --enable-slirp && \
-make -j4
+make -j$(CORES)  && \
+make install  && \
+rm -rf /tmp/qemu
 
-
-COPY requirements.txt /app/
 # create venv
+WORKDIR /app
+COPY requirements.txt /app/
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade pip && \
     /opt/venv/bin/pip install -r /app/requirements.txt && \

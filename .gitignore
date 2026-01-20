@@ -18,3 +18,4 @@ tmpfloppydisk.img
 /sourcedir/test1/__pycache__
 /sourcedir/pacific_c/output
 /sourcedir/owc_builder/owcv2
+*.pyc
