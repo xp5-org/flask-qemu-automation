@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """regen_ctestsuite.py -- build every src/*.c (see wrap_vendor_tests.py)
-through the nova-llvm-backend toolchain (nova-cc -t nova3)
+through the nova-llvm-backend toolchain (nova-cc -t nova3), same shape as
+../nova_ctestsuite/regen_ctestsuite.py but calling nova-cc instead of
+../nova_c/build_c_test.py. A build failure here is EXPECTED and routine at
+this suite's scale, so this script does not exit nonzero on one, it just
+records it. Writes gen/*.ini for everything that builds (nova-cc's own
+gen/*.simh plus the "go 100"/"quit" lines this project's test harness
+convention needs -- see NOTES.txt), and BUILD_STATUS.md summarizing the run.
 
 Requires _toolchain/ already built -- see NOTES.txt.
 
@@ -23,7 +29,12 @@ GEN_DIR = os.path.join(HERE, "gen")
 STATUS_PATH = os.path.join(HERE, "BUILD_STATUS.md")
 BUILD_FAILURES_PATH = os.path.join(HERE, "build_failures.txt")
 
-# nova-cc's dgasm -f simh output is bare "dep ADDR VAL" lines with no start/quit 
+# nova-cc's own dgasm -f simh output is bare "dep ADDR VAL" lines with no
+# start/quit -- entry point is always address 0100 octal, fixed by the
+# backend's own "org 0100" (confirmed empirically, see NOTES.txt). Appending
+# these two lines turns it into the exact same "d ADDR VAL / go START / quit"
+# shape ../nova_c/build_c_test.py already produces for the PCC pipeline, so
+# it runs through the SAME test_startnovasimh/test_novascreensearch actions.
 INI_FOOTER = "go 100\nquit\n"
 
 
@@ -50,7 +61,13 @@ def summarize_error(err):
             return line.strip()
     # dgasm's own "Address out of range" diagnostic doesn't contain the
     # word "error" and isn't prefixed "dgasm:" either, so it fell through
-    # every check above straight to the generic "last line" fallback 
+    # every check above straight to the generic "last line" fallback --
+    # which is always the *offending instruction's own text* (e.g. "JSR
+    # @putchar_SLOT,0"), printed on the line *after* the diagnostic that
+    # actually explains what's wrong. Confirmed uninformative on its own:
+    # BUILD_STATUS.md and the generated brokenbuild testlists both ended
+    # up saying a test would "keep failing to compile/assemble (JSR
+    # @putchar_SLOT,0)" with no indication *why* that's a problem.
     for i, line in enumerate(lines):
         if "Address out of range" in line:
             detail = lines[i + 1].strip() if i + 1 < len(lines) else ""
@@ -58,12 +75,14 @@ def summarize_error(err):
     # A raw LLVM assertion crash (not routed through report_fatal_error, so
     # no "LLVM ERROR:"-prefixed line exists) prints a stack dump whose LAST
     # line is often just llvm-symbolizer failing to resolve its own
-    # addresses ("Could not open input file: ...") 
+    # addresses ("Could not open input file: ...") -- noise about the crash
+    # handler, not about the actual test. Point at the real crash site
+    # instead: the "In function: NAME" line the stack dump always includes.
     if "PLEASE submit a bug report" in err:
         for line in lines:
             if line.strip().startswith("In function:"):
-                return f"LLVM backend crash ({line.strip()}) . see BUILD_STATUS.md regen log for full stack dump"
-        return "LLVM backend crash (no 'In function:' line captured) . see BUILD_STATUS.md regen log for full stack dump"
+                return f"LLVM backend crash ({line.strip()}) -- see BUILD_STATUS.md regen log for full stack dump"
+        return "LLVM backend crash (no 'In function:' line captured) -- see BUILD_STATUS.md regen log for full stack dump"
     return lines[-1].strip()
 
 
@@ -125,7 +144,8 @@ def main():
         )
         f.write(f"**{len(passed)} / {len(c_files)} candidate tests built successfully.**\n\n")
         f.write("## Built successfully (see RUNTIME_STATUS.md for which of these\n"
-                "## are in added in testlists\n\n")
+                "## actually got wired into testlists -- a clean build does not\n"
+                "## guarantee a clean run on this backend)\n\n")
         for base in passed:
             f.write(f"- {base}\n")
         f.write("\n## Failing (excluded from testlists)\n\n")

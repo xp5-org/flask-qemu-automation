@@ -8,9 +8,13 @@ Nova SIMH (dgnova) -- something neither upstream project could verify itself
 (no Nova simulator was available while building nova-llvm-backend; see its
 NOVA_PORTING_NOTES.md "What this does NOT verify").
 
-This directory is the LLVM-backend counterpart to ../nova_ctestsuite/ 
+This directory is the LLVM-backend counterpart to ../nova_ctestsuite/ (which
+runs the same kind of C89 battery against the older PCC-for-Nova pipeline in
+../nova_c/). The two pipelines are independent -- neither's toolchain or
+runtime blocks the other; see the conversation this directory came from for
+why finishing PCC's known-issues backlog isn't a prerequisite here.
 
-## Toolchain 
+## Toolchain (not checked in -- see _toolchain/, gitignored, ~3.6GB)
 
 1. Build dgasm (the assembler, separate project):
    ```
@@ -29,7 +33,7 @@ This directory is the LLVM-backend counterpart to ../nova_ctestsuite/
 
 3. Clone llvm-project at the exact pinned commit and apply the patch
    (nova-backend.patch is a superset of eclipse-llvm-backend's own
-   eclipse-backend.patch. Apply only one patch):
+   eclipse-backend.patch -- apply ONE of them, not both):
    ```
    mkdir _toolchain/llvm-project && cd _toolchain/llvm-project
    git init && git remote add origin https://github.com/llvm/llvm-project.git
@@ -37,9 +41,12 @@ This directory is the LLVM-backend counterpart to ../nova_ctestsuite/
    git checkout FETCH_HEAD
    git apply ../nova-llvm-backend/nova-backend.patch
    ```
+   (The shallow single-commit fetch works against github.com directly --
+   no need for a full multi-GB clone first.)
 
 4. Configure and build (X86 host target + the experimental Eclipse target;
-   `clang llc llvm-link opt`):
+   `clang llc llvm-link opt` is all nova-cc actually invokes -- no need to
+   build the rest of the LLVM tool suite):
    ```
    mkdir _toolchain/llvm-build && cd _toolchain/llvm-build
    cmake -G Ninja ../llvm-project/llvm \
@@ -50,17 +57,25 @@ This directory is the LLVM-backend counterpart to ../nova_ctestsuite/
      -DBUILD_SHARED_LIBS=ON
    ninja clang llc llvm-link opt
    ```
+   (`-DLLVM_USE_LINKER=gold` from the upstream READMEs is NOT available in
+   this environment -- no gold/lld installed -- but isn't needed for a
+   one-shot build, only for faster incremental relinks.) Took ~15 min wall
+   clock on an 80-core/755GB box; budget the documented 30-90+ min on
+   anything smaller.
 
-## Pipeline 
+## Pipeline (see nova-toolchain/nova-cc's own header comment for the full
+## clang -cc1 -> llvm-link -> opt -> llc -> reorder_asm.py -> dgasm chain)
+
 ```
 src/*.c
     |  nova-cc -t nova3 -o gen/NAME.simh
     v
 gen/NAME.simh              (dgasm -f simh output: bare "dep ADDR VAL" lines,
-                             entry point always address 0100 octal . this was fixed
-                             by the backend's "org 0100"; confirmed by
-                             assembling a HALT-only program)
-    |  append "go 100" + "quit"
+                             entry point always address 0100 octal -- fixed
+                             by the backend's own "org 0100"; confirmed by
+                             hand-assembling a trivial HALT-only program)
+    |  append "go 100" + "quit" (same convention ../nova_c/build_c_test.py
+    |  already uses for the PCC pipeline)
     v
 gen/NAME.ini                -- committed, like nova_ctestsuite's gen/;
                                 testlists never invoke the toolchain live
@@ -76,7 +91,10 @@ echo "quit" >> gen/smoke01.ini
 ```
 
 ## Status
-Full upstream c-testsuite single-exec battery
+
+Full upstream c-testsuite single-exec battery (all 220 tests -- see "Why
+this candidate set is much broader than nova_ctestsuite's" below) now wired
+in, same pipeline shape as nova_ctestsuite:
 
 ```
 vendor/single-exec/*.c (all 220, verbatim upstream)
@@ -96,7 +114,7 @@ __testlist__cully_llvm_knownissues01.py        (6 tests,  8/list)
 __testlist__cully_llvm_brokenbuild01.py        (5 tests, 10/list)
 ```
 
-All three generator scripts are regenerate-from-source, like
+All three generator scripts are regenerate-from-scratch, like
 nova_ctestsuite's own -- re-run wrap_vendor_tests.py -> regen_ctestsuite.py
 -> screen_runtime.py -> gen_testlists.py in that order after any toolchain
 or vendor change, rather than hand-editing the __testlist__*.py files.
@@ -543,3 +561,15 @@ wall-clock dgnova time in this session, so it lands in known_issues.txt
 as a HANG under screen_runtime.py's fixed 10s timeout convention like
 anything else that doesn't finish in time.
 
+## Why this candidate set is much broader than nova_ctestsuite's
+
+../nova_ctestsuite/NOTES.txt narrows its own candidate set to 127 of 220
+(c89-tagged, NOT needs-libc, no literal printf() call) because its PCC-for-
+Nova pipeline has no libc and no printf, and ccom needs an external cpp pass
+that can't handle much beyond trivial preprocessing. Neither restriction
+applies here: this backend has a real libc-ish rt/ (stdio.h with printf,
+string.h, stdlib.h, ctype.h) and clang -cc1 runs its own preprocessor
+internally. So wrap_vendor_tests.py here only excludes the 3 tests that
+take argc/argv (no command-line args on bare metal) -- everything else is
+attempted, and a genuine incompatibility shows up as a build failure
+instead of an upfront exclusion.
