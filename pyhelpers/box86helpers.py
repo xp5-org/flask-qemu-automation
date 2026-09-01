@@ -1,8 +1,8 @@
-import subprocess
 import os
+import subprocess
 import sys
-import time
 import threading
+import time
 
 from displayhelpers import resolve_display
 from qemuhelpers import TESSERACT_TESSDATA_ARGS
@@ -22,75 +22,27 @@ except ImportError:
 
 TESTSRC_BASEDIR = "/testsrc"
 
-DOSBOX_BIN = "dosbox-x"
-
-# -nomenu matters for screenshots: without it dosbox-x draws a 17px menu bar on
-# top of the emulated screen
-WINDOW_ARGS = ["-fastlaunch", "-nogui", "-nomenu"]
+BOX86_BIN = "86box"
 
 
-def run_headless(config_path, timeout=120, extra_args=None):
-    """Run a config to completion with no X at all (-silent runs [autoexec] then exits).
-
-    Blind: -silent creates no window, so there is nothing for `import` to
-    capture and nothing for xdotool to send keys to. 
-
-    Returns (ok, log). 
-    """
-    args = [DOSBOX_BIN, "-conf", config_path, "-silent", "-fastlaunch"]
-    if extra_args:
-        args += extra_args
-
-    env = dict(os.environ)
-    env.pop("DISPLAY", None)
-    env["SDL_VIDEODRIVER"] = "dummy"
-
-    try:
-        proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
-            env=env, start_new_session=True
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"timed out after {timeout}s: {' '.join(args)}"
-
-    log = proc.stdout + proc.stderr
-    if proc.returncode != 0:
-        return False, f"exit={proc.returncode}\n{log}"
-    return True, log
-
-
-
-class DosboxInstance:
-    """A windowed dosbox-x, driven by xdotool and screenshotted with `import`.
-
-    Use this for anything you need to observe. By default the window opens on
-    the runner's own X session 
-
-    `display="auto"` instead gives the instance a private Xvfb
-    """
-
-    def __init__(self, name, config_path=None, display=None):
+class Box86Instance:
+    def __init__(self, name, vm_path, display=None):
         self.name = name
+        self.vm_path = vm_path
         self.process = None
         self.pid = None
         self.stdout_lines = []
         self.screenshot_count = 0
-        self.config_path = config_path
         self.xvfb = None
-        # "auto" is resolved to a private Xvfb in start(); anything else lands
-        # on the runner's visible xfce/RDP session.
         self.display = display if display == "auto" else resolve_display(display)
-
 
     def _env(self):
         env = dict(os.environ)
         env["DISPLAY"] = self.display
         return env
 
-
     def _start_xvfb(self):
-        # Pick a display number nothing has claimed a socket for.
-        for num in range(90, 120):
+        for num in range(120, 150):
             if os.path.exists(f"/tmp/.X11-unix/X{num}"):
                 continue
             proc = subprocess.Popen(
@@ -111,15 +63,13 @@ class DosboxInstance:
                 proc.terminate()
         return False
 
-
     def start(self):
         if self.display == "auto" and not self._start_xvfb():
             self.stdout_lines.append("Failed to start a private Xvfb.")
             return False
 
-        args = [DOSBOX_BIN] + WINDOW_ARGS
-        if self.config_path:
-            args += ["-conf", self.config_path]
+        # -N: don't pop a confirmation dialog on quit, which would wedge stop().
+        args = [BOX86_BIN, "-P", self.vm_path, "-N"]
         try:
             self.process = subprocess.Popen(
                 args,
@@ -129,10 +79,11 @@ class DosboxInstance:
                 bufsize=1,
                 env=self._env()
             )
+            # wrapper execs the emulator, so this pid is 86Box itself.
             self.pid = self.process.pid
-            print("DOSBOX PID IS: ", self.pid, flush=True)
+            print("86BOX PID IS: ", self.pid, flush=True)
             print("start command is", args, flush=True)
-            processreg.register(self.name, self.process, source="dosbox")
+            processreg.register(self.name, self.process, source="86box")
 
             self.stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
             self.stdout_thread.start()
@@ -147,20 +98,21 @@ class DosboxInstance:
                 self.stdout_lines.append(line.strip())
 
     def get_window_id(self):
-        # Finds the window ID specifically belonging to this instance's PID
         try:
-            cmd = ['xdotool', 'search', '--pid', str(self.pid), '--onlyvisible', '--class', 'dosbox']
+            cmd = ['xdotool', 'search', '--all', '--pid', str(self.pid),
+                   '--onlyvisible', '--name', '86Box']
             result = subprocess.run(cmd, capture_output=True, text=True, env=self._env(), timeout=5)
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip().split('\n')[0]
-        except:
+        except Exception:
             pass
         return None
 
-    def wait_for_ready(self, timeout=5):
+    def wait_for_ready(self, timeout=30):
         start = time.time()
         while time.time() - start < timeout:
-            if self.process.poll() is not None: return False
+            if self.process.poll() is not None:
+                return False
             if self.get_window_id():
                 time.sleep(0.5)
                 return True
@@ -168,20 +120,15 @@ class DosboxInstance:
         return False
 
     def is_alive(self):
-        """False once the emulator process has exited.
-
-        Calling poll() is also what reaps it: without this the exited child
-        stays a zombie, so /proc keeps its pid and anything scanning for a
-        running dosbox-x (liveview) still sees one.
-        """
+        """False once the emulator process has exited. Calling poll() reaps it"""
         return self.process is not None and self.process.poll() is None
 
     def _sleep_while_alive(self, seconds, deadline=None):
-        """Sleep up to `seconds`, waking early if the process exits.
+        """Sleep up to `seconds` waking early if the process exits.
 
-        Liveness is checked once a second regardless of how long the caller
-        wants to wait, so a long OCR poll interval can't delay noticing that
-        the user closed the window. Returns False if it exited.
+        status is checked once a second
+        
+        returns False if it exited.
         """
         end = time.time() + seconds
         if deadline is not None:
@@ -192,40 +139,34 @@ class DosboxInstance:
             time.sleep(min(1.0, max(0.0, end - time.time())))
         return self.is_alive()
 
-    def wait_for_screen(self, expect, timeout=60, poll=2.0):
-        """Poll OCR until `expect` (case-insensitive) appears on screen.
-
-        Returns (ok, last_ocr_text). 
-
-        exits up early if the emulator exits (the user closed the window):
-        there is nothing left to OCR, so waiting out the full timeout would
-        just leave the run looking active with no VM behind it.
+    def wait_for_post(self, expect, timeout=60, poll=2.0):
+        """Poll the screen until `expect` (case-insensitive) shows up in OCR.
         """
         needle = expect.lower()
         deadline = time.time() + timeout
         text = ""
         while time.time() < deadline:
             if not self.is_alive():
-                return False, f"dosbox-x exited (window closed?)\n{text}"
+                return False, f"86Box exited (window closed?)\n{text}"
             ok, text = self.read_screen()
             if ok and needle in text.lower():
                 return True, text
             if not self._sleep_while_alive(float(poll), deadline):
-                return False, f"dosbox-x exited (window closed?)\n{text}"
+                return False, f"86Box exited (window closed?)\n{text}"
         return False, text
 
-    def send_command(self, cmd_text, special_keys=None, key_delay=12):
-        # dosbox-x is SDL2, which drops key events for any window it doesn't
-        # consider focused -- so `xdotool type --window <wid>` silently goes
-        # nowhere unless that window already has focus.
+    def send_command(self, cmd_text, special_keys=None, key_delay=40):
+        """Type into the 86box VM
+        """
         wid = self.get_window_id()
         if not wid:
             return False
 
         env = self._env()
         try:
-            # --sync waits for a WM confirmation event that never arrives if
-            # the window is closed/destroyed mid-call 
+            # --sync waits for a WM event that never arrives if
+            # the window is closed/destroyed mid-call
+            # timeout need to be set here or gets stuck forever
             subprocess.run(['xdotool', 'windowactivate', '--sync', wid],
                            capture_output=True, env=env, timeout=5)
             subprocess.run(['xdotool', 'windowfocus', '--sync', wid],
@@ -256,7 +197,6 @@ class DosboxInstance:
             return False
         return True
 
-
     def take_screenshot(self, test_step=None, filename=None):
         if APPBASE_DIR not in sys.path:
             sys.path.insert(0, APPBASE_DIR)
@@ -280,13 +220,8 @@ class DosboxInstance:
             print("FAILED TO TAKE SCREENSHOT", e)
             return False, str(e)
 
-
     def read_screen(self):
         """OCR the current screen. Returns (ok, text).
-
-        --psm 6 + TESSERACT_TESSDATA_ARGS match ocr_word_find's tuning (see
-        qemuhelpers.py) -- the compact BIOS/DOS font otherwise gets badly
-        misread by tesseract's untuned defaults.
         """
         ok, path = self.take_screenshot(filename=f"/tmp/{self.name}-ocr.png")
         if not ok:
@@ -298,7 +233,6 @@ class DosboxInstance:
             return True, result.stdout
         except Exception as e:
             return False, str(e)
-
 
     def stop(self):
         processreg.unregister(self.name)
@@ -319,59 +253,46 @@ class DosboxInstance:
             self.xvfb = None
 
 
+class Box86Conf:
+    """Minimal editor for 86box.cfg"""
 
-
-class DosboxConf:
     def __init__(self, filepath):
         self.filepath = filepath
-        # newline="" disables Python's universal-newline translation so we
-        # see the template's actual line endings, then normalize to bare
-        # lines (no terminator stored) ourselves
+
         with open(filepath, "r", newline="") as f:
             raw = f.read()
-        self.lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        if self.lines and self.lines[-1] == "":
-            self.lines.pop()
+        # linux and dos line ending differs need to replace
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        self.lines = raw.splitlines(keepends=True)
 
-    def autoexec_insert(self, insert_line):
-        self.section_insert("[autoexec]", insert_line)
-
-    def section_insert(self, section_header, insert_line):
-        """Insert insert_line as the first line of section_header (e.g.
-        "[dosbox]"), appending the section (and the line) if it isn't
-        present. Section matching is case-insensitive, same as dosbox-x's
-        own conf parser."""
-        new_lines = []
-        inserted = False
+    def set(self, section, key, value):
+        out, in_section, done = [], False, False
         for line in self.lines:
-            new_lines.append(line)
-            if not inserted and line.strip().lower() == section_header.lower():
-                new_lines.append(insert_line)
-                inserted = True
-        if not inserted:
-            new_lines.append(section_header)
-            new_lines.append(insert_line)
-        self.lines = new_lines
-
-    def disable_quit_warning(self):
-        """dosbox-x's default `quit warning=auto` pops an "Are you sure?"
-        confirmation dialog when the window is closed while a DOS program is
-        running"""
-        self.section_insert("[dosbox]", "quit warning=false")
-
-
-    def autotype_insert(self, buttons, wait=1.0, pace=0.2):
-        """Queue keystrokes into the emulated keyboard from [autoexec].
-
-        AUTOTYPE is a dosbox-x builtin, so it needs no X and no window focus
-        """
-        seq = " ".join(buttons)
-        self.autoexec_insert(f"autotype -w {wait} -p {pace} {seq}")
+            stripped = line.strip()
+            if stripped.startswith("["):
+                if in_section and not done:
+                    out.append(f"{key} = {value}\n")
+                    done = True
+                in_section = stripped == f"[{section}]"
+            elif in_section and stripped.split("=")[0].strip() == key:
+                line = f"{key} = {value}\n"
+                done = True
+            out.append(line)
+        if not done:
+            if not any(l.strip() == f"[{section}]" for l in out):
+                out.append(f"\n[{section}]\n")
+            else:
+                idx = next(i for i, l in enumerate(out) if l.strip() == f"[{section}]")
+                out.insert(idx + 1, f"{key} = {value}\n")
+                self.lines = out
+                return
+            out.append(f"{key} = {value}\n")
+        self.lines = out
 
     def save(self, outpath=None):
         path = outpath if outpath else self.filepath
-        print('SAVING NEW CONF TO PATH: ', path)
-        # newline="" for the same reason as __init__: write the \r\n we join
-        # with literally, instead of letting text mode re-translate it.
+        print('SAVING NEW 86BOX CONF TO PATH: ', path)
+        # newline="" so the \r\n we substitute in is written literally,
+        # matching DosboxConf.save's fix for the same issue.
         with open(path, "w", newline="") as f:
-            f.write("\r\n".join(self.lines) + "\r\n")
+            f.write("".join(self.lines).replace("\n", "\r\n"))
