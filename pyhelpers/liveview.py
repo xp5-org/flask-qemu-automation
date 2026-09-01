@@ -580,6 +580,32 @@ class _SimhAdapter(_Adapter):
         return True, getattr(obj, "buf", "") or ""
 
 
+class _HostBuildAdapter(_Adapter):
+    """A test_hostbuild subprocess (dispatch_functions.HostBuildInstance) --
+    a plain host shell script/build with no display"""
+    kind = "hostbuild"
+
+    @classmethod
+    def matches(cls, obj):
+        return hasattr(obj, "log_path") and hasattr(obj, "process")
+
+    @classmethod
+    def caps(cls, entry):
+        return ["tty"]
+
+    @classmethod
+    def tty(cls, entry):
+        obj = entry.get("obj")
+        path = getattr(obj, "log_path", None) if obj is not None else None
+        if not path or not os.path.exists(path):
+            return False, "no output captured yet for this host build"
+        try:
+            with open(path, "r", errors="replace") as f:
+                return True, f.read()
+        except OSError as e:
+            return False, f"cannot read {path}: {e}"
+
+
 class _FbMonitorAdapter(_Adapter):
     """A pygame window fed by a live framebuffer sink -- novafbhelpers's
     NovaFbMonitorProcess and verilatorvgahelpers's VerilatorFbMonitorProcess
@@ -625,7 +651,7 @@ class _VerilatorAdapter(_Adapter):
 
 
 ADAPTERS = (_QemuAdapter, _DosboxAdapter, _Box86Adapter, _BasiliskAdapter, _SimhAdapter,
-            _NovaFbMonitorAdapter, _VerilatorFbMonitorAdapter, _VerilatorAdapter)
+            _HostBuildAdapter, _NovaFbMonitorAdapter, _VerilatorFbMonitorAdapter, _VerilatorAdapter)
 
 
 # ── Small shared utilities ────────────────────────────────────────────────────

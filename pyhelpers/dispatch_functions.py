@@ -778,8 +778,22 @@ def test_start_basilisk(name="basilisk1", rom=None, boot_disk=None,
     return True, "\n".join(log)
 
 
+class HostBuildInstance:
+    """Live-view handle for a running test_hostbuild subprocess.
+
+    Duck-typed to match liveview.py's _HostBuildAdapter (log_path + process),
+    the same way NovaSimhInstance's .buf/.master_fd match _SimhAdapter --
+    published into context[name] for the run of the step so /instances can
+    offer a 'tty' view of stdout-so-far, then popped once it finishes.
+    """
+    def __init__(self, name, process, log_path):
+        self.name = name
+        self.process = process
+        self.log_path = log_path
+
+
 @dispatchtest_step
-def test_hostbuild(command=None, cwd=None, timeout=600, **kwargs):
+def test_hostbuild(command=None, cwd=None, timeout=600, name=None, **kwargs):
     """Run a host-side build command for retro68k and others. cross-compile before
     booting QEMU. This is the 'compile on the Linux host' half of the m68k
     """
@@ -792,6 +806,8 @@ def test_hostbuild(command=None, cwd=None, timeout=600, **kwargs):
     if not command:
         return False, "test_hostbuild: no command given"
 
+    name = name or config.get("function") or config.get("projdir") or "hostbuild"
+
     log = [f"$ {command}" + (f"   (cwd={cwd})" if cwd else "")]
     timeout = int(timeout)
     fd, out_path = tempfile.mkstemp(prefix="test_hostbuild_", suffix=".log")
@@ -802,6 +818,9 @@ def test_hostbuild(command=None, cwd=None, timeout=600, **kwargs):
             proc = subprocess.Popen(command, shell=True, cwd=cwd,
                                     stdout=out_f, stderr=subprocess.STDOUT,
                                     start_new_session=True)
+        # Visible on /instances (liveview.py's _HostBuildAdapter) for the
+        # rest of this step's run -- a live "tty" read of stdout-so-far.
+        context[name] = HostBuildInstance(name, proc, out_path)
         timed_out = False
         aborted = False
         while True:
@@ -825,6 +844,7 @@ def test_hostbuild(command=None, cwd=None, timeout=600, **kwargs):
         with open(out_path) as f:
             output = f.read().rstrip()
     finally:
+        context.pop(name, None)
         try:
             os.remove(out_path)
         except OSError:

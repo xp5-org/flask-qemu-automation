@@ -13,23 +13,54 @@ TOOLCHAIN="$HERE/_toolchain"
 
 mkdir -p "$TOOLCHAIN"
 
+# only one instance lock
+exec 200>"$TOOLCHAIN/.bootstrap.lock"
+if ! flock -n 200; then
+    echo "another bootstrap_toolchain.sh is already running against this _toolchain/ -- waiting for it to finish..."
+    flock 200
+fi
+
 stage_done() { [ -f "$TOOLCHAIN/.stage_$1" ]; }
 mark_stage() { touch "$TOOLCHAIN/.stage_$1"; }
 
+# dgasm is pinned the same way llvm-project already was -- fetched by exact
+# commit rather than a plain `git clone` of whatever HEAD happens to be.
+# Commits below are the combination verified to build a working nova-cc
+# (nova-cc's own SAVE/dgasm incompatibility -- see backend_clones below --
+# is exactly what an unpinned nova-llvm-backend clone silently ran into).
+DGASM_COMMIT="2e6fa34b78b573ccf8a886b2caf052ef5d10bd6b"
+
 if ! stage_done dgasm; then
-    echo "--- building dgasm ---"
+    echo "--- building dgasm (pinned) ---"
     rm -rf "$TOOLCHAIN/dgasm"
-    git clone https://github.com/CWood1/dgasm "$TOOLCHAIN/dgasm"
+    mkdir -p "$TOOLCHAIN/dgasm"
+    (
+        cd "$TOOLCHAIN/dgasm"
+        git init
+        git remote add origin https://github.com/CWood1/dgasm
+        git fetch --depth 1 origin "$DGASM_COMMIT"
+        git checkout FETCH_HEAD
+    )
     mkdir -p "$TOOLCHAIN/dgasm/build"
     (cd "$TOOLCHAIN/dgasm/build" && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j"$(nproc)")
     mark_stage dgasm
 fi
 
 if ! stage_done backend_clones; then
-    echo "--- cloning nova-llvm-backend + eclipse-llvm-backend ---"
+    echo "--- extracting vendored nova-llvm-backend + eclipse-llvm-backend ---"
+    # These two are vendored (vendor/*.tar.gz), not git-fetched like dgasm/
+    # llvm-project above/below: the exact commits needed are not reachable
+    # from origin at all, confirmed via `git ls-remote` -- nova-llvm-backend
+    # e3a35fe2fb340c9e675affd520a80ae3ecb22517 is a local fix (for the SAVE
+    # instruction dgasm's opcode table only allows for CPU_ECLIPSE_S140, not
+    # the nova3 this project targets -- current upstream emits it
+    # unconditionally again) that was never pushed, and origin's
+    # eclipse-llvm-backend HEAD has since moved to an unrelated commit.
+    # `git fetch --depth 1 origin <sha>` for either fails with
+    # "not our ref" -- there is nothing upstream left to fetch.
     rm -rf "$TOOLCHAIN/nova-llvm-backend" "$TOOLCHAIN/eclipse-llvm-backend"
-    git clone https://github.com/cullyrichard/nova-llvm-backend "$TOOLCHAIN/nova-llvm-backend"
-    git clone https://github.com/cullyrichard/eclipse-llvm-backend "$TOOLCHAIN/eclipse-llvm-backend"
+    tar xzf "$HERE/vendor/nova-llvm-backend-e3a35fe2.tar.gz" -C "$TOOLCHAIN"
+    tar xzf "$HERE/vendor/eclipse-llvm-backend-b7e3f846.tar.gz" -C "$TOOLCHAIN"
     mark_stage backend_clones
 fi
 
