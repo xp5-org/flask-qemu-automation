@@ -1,0 +1,545 @@
+# cully_llvm
+
+Runs C programs through cullyrichard's nova-llvm-backend (a real LLVM/Clang
+backend for the Data General Nova, extending the sibling eclipse-llvm-backend
+project -- see https://github.com/cullyrichard/nova-llvm-backend and
+https://github.com/cullyrichard/eclipse-llvm-backend) against OUR OWN real
+Nova SIMH (dgnova) -- something neither upstream project could verify itself
+(no Nova simulator was available while building nova-llvm-backend; see its
+NOVA_PORTING_NOTES.md "What this does NOT verify").
+
+This directory is the LLVM-backend counterpart to ../nova_ctestsuite/ 
+
+## Toolchain 
+
+1. Build dgasm (the assembler, separate project):
+   ```
+   git clone https://github.com/CWood1/dgasm _toolchain/dgasm
+   cd _toolchain/dgasm && mkdir build && cd build
+   cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
+   ```
+
+2. Clone the LLVM backend packages:
+   ```
+   git clone https://github.com/cullyrichard/nova-llvm-backend _toolchain/nova-llvm-backend
+   git clone https://github.com/cullyrichard/eclipse-llvm-backend _toolchain/eclipse-llvm-backend
+   ```
+   (nova-llvm-backend is the one actually used; eclipse-llvm-backend is only
+   needed if you want its own README's smoke tests / Eclipse-only path.)
+
+3. Clone llvm-project at the exact pinned commit and apply the patch
+   (nova-backend.patch is a superset of eclipse-llvm-backend's own
+   eclipse-backend.patch. Apply only one patch):
+   ```
+   mkdir _toolchain/llvm-project && cd _toolchain/llvm-project
+   git init && git remote add origin https://github.com/llvm/llvm-project.git
+   git fetch --depth 1 origin 8307b46d3ad5ace00c21e1fec6ef4ef4284290e9
+   git checkout FETCH_HEAD
+   git apply ../nova-llvm-backend/nova-backend.patch
+   ```
+
+4. Configure and build (X86 host target + the experimental Eclipse target;
+   `clang llc llvm-link opt`):
+   ```
+   mkdir _toolchain/llvm-build && cd _toolchain/llvm-build
+   cmake -G Ninja ../llvm-project/llvm \
+     -DLLVM_ENABLE_PROJECTS=clang \
+     -DLLVM_TARGETS_TO_BUILD=X86 \
+     -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Eclipse \
+     -DCMAKE_BUILD_TYPE=Release \
+     -DBUILD_SHARED_LIBS=ON
+   ninja clang llc llvm-link opt
+   ```
+
+## Pipeline 
+```
+src/*.c
+    |  nova-cc -t nova3 -o gen/NAME.simh
+    v
+gen/NAME.simh              (dgasm -f simh output: bare "dep ADDR VAL" lines,
+                             entry point always address 0100 octal . this was fixed
+                             by the backend's "org 0100"; confirmed by
+                             assembling a HALT-only program)
+    |  append "go 100" + "quit"
+    v
+gen/NAME.ini                -- committed, like nova_ctestsuite's gen/;
+                                testlists never invoke the toolchain live
+```
+
+Regenerating gen/smoke01.ini once _toolchain/ is built:
+```
+LLVM_BUILD=$(pwd)/_toolchain/llvm-build PATH="$(pwd)/_toolchain/dgasm/build:$PATH" \
+  _toolchain/nova-llvm-backend/nova-toolchain/nova-cc -t nova3 -o /tmp/smoke01.simh src/smoke01.c
+cat /tmp/smoke01.simh > gen/smoke01.ini
+echo "go 100" >> gen/smoke01.ini
+echo "quit" >> gen/smoke01.ini
+```
+
+## Status
+Full upstream c-testsuite single-exec battery
+
+```
+vendor/single-exec/*.c (all 220, verbatim upstream)
+  |  wrap_vendor_tests.py  (skips only the 3 using argc/argv)
+  v
+src/*.c (217 wrapped, + smoke01.c hand-written)               = 218 candidates
+  |  regen_ctestsuite.py  (nova-cc -t nova3 per file)
+  v
+gen/*.ini                                                      213 built
+  |  screen_runtime.py  (run once against dgnova, 10s timeout)
+  v
+stable_pass.txt (207) / known_issues.txt (6: 5 FAIL + 1 HANG) / build_failures.txt (5)
+  |  gen_testlists.py
+  v
+__testlist__cully_llvm_batch{01..21}.py        (207 tests, 10/list)
+__testlist__cully_llvm_knownissues01.py        (6 tests,  8/list)
+__testlist__cully_llvm_brokenbuild01.py        (5 tests, 10/list)
+```
+
+All three generator scripts are regenerate-from-source, like
+nova_ctestsuite's own -- re-run wrap_vendor_tests.py -> regen_ctestsuite.py
+-> screen_runtime.py -> gen_testlists.py in that order after any toolchain
+or vendor change, rather than hand-editing the __testlist__*.py files.
+
+Not root-caused (by design -- see this file's own header): the 5 FAIL / 1
+HANG in known_issues.txt, and the 5 build failures in build_failures.txt
+(BUILD_STATUS.md has the specific error per test -- no remaining LLVM
+backend crash at all, and only one real dgasm addressing overflow left
+(ct00216 -- see fix #6 below for why 077/128/143 are gone but this one
+is a different, harder limit), and a handful of real
+arch/toolchain limits this runtime doesn't (and, for `double`/64-bit
+int, largely can't) implement: `math.h` (no libm, and no `double` --
+see rt/eclipse_rt.c's soft-float section, `double` needs real 64-bit
+int support this backend doesn't have, ct00174), `int64_t`/64-bit
+integer literals and arithmetic (ct00104), `FILE*`-backed real file I/O
+(bare metal: no filesystem to back one, ct00187), and a real upstream
+test needing >16-bit integers (ct00204, an ARM64-ABI-shaped struct
+test -- see fix #2 below on its nested-aggregate global initializer,
+still unimplemented). ct00203 now builds (fix #4) but landed in
+known_issues.txt's FAIL list instead of stable_pass.txt -- a separate,
+not-yet-root-caused runtime wrong-answer bug, distinct from the codegen
+crash fix #4 addressed.
+
+`calloc`, `strncpy`, `strchr`, `strrchr`, `memcmp`, `sprintf` (with a
+`%0Nd` zero-pad width extension), `NULL`, and a `wchar_t` typedef
+(rt/include/wchar.h) plus a stdout-only `FILE`/`fprintf` shim were added
+to rt/ this session (see rt/eclipse_rt.c and rt/include/*.h) -- these
+were plain missing-libc-surface build failures, not backend bugs, and
+fixing them moved ct00040/171/179/186 to stable_pass, while ct00189 and
+ct00220 (which also needed `FILE`/`wchar_t` to even attempt building)
+turned out to hit two *actual LLVM backend* bugs that got fixed too (see
+below) -- ct00189 now passes; ct00220 still hits an unrelated,
+unexplained backend crash (LLVM ISel, not related to wchar_t/FILE at
+all -- the type/library support they needed compiled fine).
+
+Two real LLVM backend bugs were found and fixed this session (in the
+externally-cloned _toolchain/llvm-project/llvm/lib/Target/Eclipse/ --
+NOT part of this project's own committed source, so these patches only
+persist for as long as this checkout of _toolchain/ does; if _toolchain/
+is ever re-cloned from scratch, re-apply the same changes to
+EclipseISelLowering.{h,cpp}, EclipseInstrInfo.td, and
+EclipseAsmPrinter.{h,cpp} or these tests will regress back to build
+failures):
+
+1. "Eclipse indirect (non-direct-symbol) calls are not supported"
+   (EclipseISelLowering.cpp's LowerCall): every call on this backend goes
+   through a page-zero jump slot, `JSR @funcname_SLOT,0`, where
+   `funcname_SLOT` is a data word statically initialized to the callee's
+   address -- but LowerCall only knew how to build that slot name from a
+   compile-time-known symbol (a direct call), and gave up on a genuinely
+   indirect call (a real runtime function pointer -- `(*f)(x)`, a
+   function returning a function pointer and called through
+   immediately, etc). Fixed by adding ONE shared, dedicated slot
+   (`__indirect_call_SLOT`, declared only for a module that actually
+   uses one -- see EclipseAsmPrinter.h's own comment on the page-zero
+   budget) plus a new CALLSLOT_STORE pseudo (EclipseInstrInfo.td) that
+   stores the runtime callee address into it right before an ordinary
+   CALL through that same slot. Fixed ct00087/89/124/189/210.
+   IMPORTANT: the shared slot name MUST end in "_SLOT" (case-sensitive)
+   -- reorder_asm.py's PZ_VAR_RE regex (nova-toolchain/reorder_asm.py) is
+   what actually moves it to page-zero; a name that doesn't match that
+   convention silently gets left wherever llc emitted it, and dgasm
+   rejects it as "Address out of range" on any program of real size (not
+   a build error you'd get from the Eclipse backend itself -- found the
+   hard way, first attempt used a lowercase name and it slipped through
+   llc/dgasm's own compile step fine, only failing at the reorder step).
+
+2. `EclipseAsmPrinter::emitGlobalVariable`'s "TODO: unsupported
+   initializer" fallback (silently initializes to 0, no diagnostic) hit
+   any struct or function-pointer-valued global -- e.g. `struct S {
+   int (*zerofunc)(); } s = { &zero };` or `int (*f)(int) = &fred;`.
+   This masked bug #1 above during testing: ct00089's zerofunc field
+   silently read 0 regardless of the CALL mechanism being fixed, calling
+   through it hung. Extended emitGlobalVariable to handle two more
+   shapes: a bare GlobalValue initializer (`var NAME = target`, the
+   exact same "this word's value is another symbol's address" pattern
+   CallSlots/AddrSlots already use) for `&function`/`&global`-valued
+   scalars, and a ConstantStruct whose members are all either
+   ConstantInt or GlobalValue (one `var` line per member, same
+   first-member-keeps-the-real-name convention emitArrayElements already
+   uses) for a flat struct like `s` above. A struct with a nested
+   aggregate member (HFA-style ABI tests, e.g. ct00204) still isn't
+   attempted -- falls through to the same placeholder as before. Turned
+   out to also silently fix five ALREADY-BUILDING tests that were
+   quietly reading wrong (zero) initializer values and failing at
+   runtime: ct00045/47/48/49/146 moved from known_issues.txt (FAIL) to
+   stable_pass.txt as a result, with no code change of their own.
+
+3. `SelectionDAG::getMemcpy`'s libcall fallback (EclipseTargetLowering
+   never set MaxStoresPerMemcpy/Memmove/Memset, so all three defaulted
+   to TargetLoweringBase's stock 8 -- 4 with -Os): any aggregate copy
+   needing more than 8 word-stores to inline (e.g. `int Array[10] =
+   {...}` -- getOptimalMemOpType sizes a 2-byte-aligned copy in i16/word
+   chunks, so 10 elements means 10 stores) fell through to an actual
+   `memcpy`/`memmove`/`memset` libcall, which crashes LowerCall (see
+   getOptimalMemOpType's own header comment, which already documented
+   this exact crash but had only worked around the *aligned* half of
+   it, not the too-many-stores half). Fixed by raising all three
+   thresholds to 1024 in the constructor -- comfortably past anything
+   this suite's aggregates need -- so inlining is always preferred and
+   the (unimplemented) libcall path is never taken. Moved ct00185/208/
+   220 from build_failures.txt to stable_pass.txt outright (ct00220's
+   crash was the "unrelated, unexplained backend crash" flagged in fix
+   #2's paragraph above -- same root cause after all); ct00216 also
+   stopped crashing here but its larger inlined-copy code pushed
+   several page-zero jump-table slots (`JMP @LBB15_1_SLOT,0` etc.) past
+   dgasm's addressing range ("Address out of range. Got 342, should be
+   0 - 255"), so it moved sideways into the dgasm addressing-overflow
+   bucket above rather than reaching stable_pass.
+
+4. A raw `ISD::BRCOND` surviving all the way to instruction selection
+   (`LLVM ERROR: Cannot select: ch = brcond ..., EclipseISD::WRAPPER
+   TargetConstantPool:i16<i16 1> 0` -- the same crash signature on
+   ct00034/109/203/213/215, all six of which have a
+   `do { ... } while(1)` or equivalent compile-time-constant-condition
+   branch in the source, e.g. `br i1 true, label %do.body, label
+   %do.end` at the IR level). BRCOND is already Custom (see the
+   constructor's own long-standing comment on why), so the expected
+   path is LowerBRCOND -- but instrumenting it directly (a temporary
+   `fprintf` in LowerBRCOND/LowerBR_CC, since this Release build has no
+   assertions and thus no `-debug-only` support) showed it's called
+   ZERO times for this exact node, while LowerBR_CC (which every
+   ordinary `if (icmp ...)` reaches directly -- SelectionDAGBuilder
+   builds BR_CC straight from an icmp-fed branch, never touching BRCOND
+   at all) fires normally. Root cause: a literal `br i1 true, ...`'s
+   condition is genuine IR-level i1, which DAGTypeLegalizer promotes to
+   this backend's one legal type (i16, via `setBooleanContents
+   (ZeroOrOneBooleanContent)`) through its own boolean-operand-promotion
+   path for BRCOND specifically -- and that path replaces BRCOND's
+   operand directly without re-entering LegalizeDAG's ordinary Custom
+   dispatch for the parent node the way every other Custom-lowered
+   result does. (Confirmed this is an LLVM-generic legalizer quirk, not
+   something guardable from the IR side: `-disable-O0-optnone` plus an
+   IR-level `simplifycfg` pass in nova-cc did fold the literal `br i1
+   true` away and fix these five -- but only because removing `optnone`
+   silently raises llc's own internal OptLevel from the forced None
+   clang stamps at -O0 up to llc's un-pinned default (Default, ~-O2),
+   which happens to dodge this exact legalizer path -- not because
+   anything about the fold itself mattered. That's llc running at a
+   completely different, far more aggressive optimization level for
+   the ENTIRE suite, not a targeted fix: confirmed by explicitly pinning
+   `-O0` back onto llc, which reproduced the exact same crash even with
+   `optnone` removed -- and separately, `-disable-O0-optnone` ALONE,
+   with no simplifycfg at all, newly broke ct00081/82 (previously
+   building fine) with this identical crash signature on a completely
+   unrelated, non-constant runtime condition, just from running at a
+   higher optlevel on this immature backend. Reverted both nova-cc
+   changes entirely -- not worth the blast radius across 218 tests for
+   a fix that doesn't actually address the root cause.)
+   Fixed properly instead with a target DAGCombine: `setTargetDAGCombine
+   (ISD::BRCOND)` plus a `PerformDAGCombine` case that reuses
+   LowerBRCOND unchanged, gated on `DCI.isAfterLegalizeDAG()` --
+   DAGCombiner's target-hook dispatch fires on every node of a
+   registered opcode regardless of how that node arrived, independent
+   of LegalizeDAG's own per-node Custom dispatch, so it catches exactly
+   the node the type-legalizer's promotion path skipped. The
+   `isAfterLegalizeDAG()` gate is required, not cosmetic: firing this
+   combine at an earlier phase (the default, unless restricted) hits
+   the DAG before it's fully legal and produces a *different* crash
+   (`LLVM ERROR: unimplemented Eclipse LowerOperation for <N>`),
+   confirmed by first trying it ungated. Moved ct00034/109/213/215 to
+   stable_pass.txt outright; ct00203 now builds too but produces a wrong
+   answer at runtime -- a separate, not-yet-root-caused FAIL, so it
+   landed in known_issues.txt instead. ct00143's br_jt (jump-table,
+   not brcond) crash is a structurally different node and unaffected by
+   this fix.
+
+5. `ISD::BR_JT` (jump-table branch, the opcode a dense `switch` --
+   ct00143 is Duff's device, `switch (n % 8) { case 0: ...
+   case 7: ... }`, 8 consecutive case labels -- gets lowered to instead
+   of a cascade of compares) and `ISD::BRIND` (computed goto) were never
+   given an explicit `setOperationAction` call, so both defaulted to
+   `LegalizeAction`'s enum-zero value, `Legal`. `TargetLowering::
+   areJTsAllowed()` checks exactly `isOperationLegalOrCustom(BR_JT/BRIND,
+   Other)` to decide whether SelectionDAGBuilder's switch-lowering
+   heuristic is allowed to pick a jump table at all -- so it answered
+   yes, despite this backend never having implemented a BR_JT lowering
+   (no ISel pattern, no JumpTableInfo emission in EclipseAsmPrinter),
+   crashing with `Cannot select: ch = br_jt ..., JumpTable...` the one
+   time a switch was dense enough to trigger it. Fixed the same way as
+   fix #3's memcpy-libcall avoidance -- rather than implementing the
+   whole jump-table feature (a real ISel pattern plus AsmPrinter support
+   for emitting the table itself), explicitly setting both to `Expand`
+   makes `areJTsAllowed()` answer no, so SelectionDAGBuilder falls back
+   to the ordinary cascade-of-compares switch lowering this backend's
+   BR_CC path already handles correctly. (`Expand` isn't itself a
+   working BR_JT lowering here either -- its only real effect is
+   upstream, at the areJTsAllowed() check, before any BR_JT node would
+   ever be built.) ct00143 no longer crashes the compiler, but its
+   larger compare-cascade code now overflows dgasm's page-zero
+   addressing range the same way ct00077/128/216 already did, so it
+   moved from the LLVM-crash bucket into the dgasm-addressing-overflow
+   bucket above rather than reaching stable_pass -- no remaining LLVM
+   backend crash anywhere in build_failures.txt as of this fix.
+
+6. The dgasm addressing-overflow bucket (fix #5's paragraph lumped these
+   together, but they're actually two unrelated root causes under the
+   same dgasm error text): ct00077/128/143 were all `LDA/STA reg,off,2`
+   -- AC2/frame-pointer-relative locals/temps access, where `off` is an
+   8-bit *signed* displacement field (dgasm's own -128..127 range, a
+   real Nova ISA hardware limit on register-relative addressing, not a
+   dgasm choice). `EclipseRegisterInfo::eliminateFrameIndex` (LDFI/STFI's
+   frame-index resolution) never range-checked the resolved offset
+   before substituting it in, so any function with a stack frame large
+   enough (sizeable local arrays, or just enough locals) to push a
+   local's displacement past that range got rejected at assemble time
+   despite llc emitting otherwise-clean code. Fixed by giving
+   eliminateFrameIndex a fallback for exactly that case, reusing two
+   mechanisms this backend already trusts elsewhere: LEAFI's own
+   "materialize FP+offset as an absolute address" sequence (just above
+   in the same file) plus LDIND/STIND's existing page-zero-indirect
+   dereference through the shared `_scratch` word (used for pointer
+   dereference and, per the big comment on LDIND/STIND below, every
+   global access) -- so an out-of-range local becomes "compute its
+   absolute address, then load/store through `_scratch` indirectly"
+   instead of a displacement that can't reach it. Needed exactly one
+   scratch register for a load (safely reusing the load's own
+   destination register, like LEAFI reuses its own Dst) and exactly one
+   for a store too (a fresh, scavenger-resolved register) -- NOT two:
+   an early version copied AC2 into a temp before adding the offset
+   (mirroring LEAFI's own MOVrr+ADDrr shape exactly), which needs a
+   *second* simultaneously-live register on top of the store's Src, and
+   this target's two-GPR budget plus single emergency spill slot can't
+   satisfy three simultaneously-live registers ("LLVM ERROR: Cannot
+   scavenge register without an emergency spill slot!", confirmed
+   empirically). Fixed by skipping the copy: AC2 is reserved from the
+   allocator's perspective but still an ordinary GPR-class register (see
+   EclipseRegisterInfo.td), so it can be ADDrr's own source operand
+   directly, collapsing the sequence down to one temp register
+   throughout. Moved ct00077/128/143 to stable_pass.txt outright.
+   ct00216 is the one test in this bucket NOT actually hitting this bug
+   -- its "Address out of range" is on `JSR @print_uint_SLOT,0`-style
+   page-zero call/data slots (absolute placement, 0-255 range, a
+   *different* dgasm addressing mode entirely from AC2-relative
+   locals), meaning it's genuinely running out of the shared 256-word
+   page-zero budget across all the callees/globals this one program
+   needs simultaneously -- an unrelated, harder problem (would need
+   compacting or sharing page-zero slot usage, not a displacement-range
+   fix) left unaddressed this session.
+
+7. First dig into the 16 FAIL / 2 HANG runtime known-issues (build-clean,
+   wrong output/timeout). `x = x / 2` (a plain `int`, compile-time-
+   constant divisor that happens to be a power of 2) silently computed 0
+   instead of 5 for x=10 -- confirmed via a hand-traced dgnova
+   step/register trace (`step 1` + `examine ac0/ac1/ac2` in a row,
+   fed as a SIMH command script -- this Release build has no
+   assertions, so `llc -debug-only=...` isn't available) that the
+   divisor register held -32768 instead of 2 going into the hardware
+   DIV. Root cause: DAGCombiner's OWN generic "sdiv by a power-of-2
+   constant" strength reduction (DAGCombiner.cpp's visitSDIVLike, via
+   the default TargetLowering::BuildSDIVPow2 -- gated on
+   isIntDivCheap(), never overridden here, defaulting false) fires
+   *before* this backend's Custom SDIV lowering (LowerSDIVREM) ever
+   sees the node at all, replacing the whole `sdiv` with a manual
+   SRA/SRL/ADD/SELECT sequence. That sequence's first step needs
+   `SRA(x, 15)` (BitWidth-1, to replicate the sign bit) -- and this
+   backend's LowerShift turns *any* SRA-by-N into a genuine "real
+   divide by 2^N" (see LowerShift's own header comment on why), so
+   `SRA(x, 15)` became an actual runtime `DIV` by 2^15 truncated to
+   i16 (`uint64_t(1)<<15` reinterpreted as a signed i16 -- exactly
+   -32768), immediately followed by the expansion's *second* SRA(_, 1)
+   (the real halving step) as a *separate*, back-to-back DIV -- two
+   hardware DIVs in a row sharing this target's two-GPR register file,
+   which silently produced a wrong quotient (not separately root-
+   caused -- see LowerSDIVREM's own MUL/DIV section for the general
+   shape of register-interaction bugs already found in this exact
+   corner of the backend). Fixed by overriding `isIntDivCheap()` to
+   return `true` (EclipseISelLowering.h) -- tells DAGCombiner this
+   target's single hardware DIV is cheap enough that the whole
+   multi-instruction strength-reduction isn't worth attempting, so the
+   original SDIV/SREM node survives untouched into Legalize and reaches
+   LowerSDIVREM as designed. Moved ct00009 to stable_pass.txt.
+   While investigating, also hardened two related but *not* separately
+   confirmed hazards against the same underlying "plain UDIV/SDIV can
+   get DAGCombine'd into a shift, which this backend's own Custom SRA/
+   SRL lowering turns right back into a UDIV/SDIV, forever" class of
+   bug (the isIntDivCheap fix above doesn't cover it: DAGCombiner's
+   "udiv by pow2 -> shift" fold, unlike the sdiv one, isn't
+   isIntDivCheap-gated at all): LowerShift's own SRL case and
+   LowerSDIVREM's UQuot computation now both use EclipseISD::HALVE
+   (already established for exactly this purpose by the ADD-combine's
+   array-offset halving, see its own header comment) instead of a
+   plain ISD::UDIV. Confirmed HALVE fixes a genuine `unsigned x; x =
+   x / 2u;` case through LowerShift's path; the LowerSDIVREM one is
+   precautionary, not confirmed against any specific failure.
+   Investigated one further, much larger bug surface -- pointer
+   arithmetic that gets *stored back* to a local pointer variable
+   before being dereferenced (`p = p + 1;` / `p++` / `p += n`, as
+   opposed to `*(p+1)` used immediately) -- which plausibly explains
+   several more of the remaining FAILs (at least ct00032/37/72/73, all
+   exactly this shape). Root cause identified precisely: the ADD-
+   combine's `FeedsMemoryAddress` gate (this file, the runtime-GEP
+   halving logic) only recognizes N being used as a load/store address
+   *right now*; a pointer value stored to a local and reloaded later
+   loses that connection entirely, so the byte-scaled (unhalved) GEP
+   offset reaches its eventual dereference already wrong. A first
+   attempted fix (also treating "N stored as a *value* into a
+   FrameIndex-addressed local" as address-feeding) caused a severe
+   regression (infinite garbage output on ct00072) elsewhere in the
+   suite and was reverted outright -- the ADD-combine is exercised by
+   virtually all pointer arithmetic in the whole 218-test suite, too
+   high a blast radius for a heuristic this easy to get wrong. Left
+   unfixed this session; a real fix likely needs to track "is this SDValue
+   pointer-typed" through the store/reload round trip rather than
+   peeking at immediate users, which is more invasive than this
+   session's available time allowed for.
+
+8. MULrr/UDIVrr/UREMrr's post-RA expansion (EclipseInstrInfo.cpp) only
+   ever saved/restored AC2 (the frame pointer) around the hardware MUL/
+   DIV sequence, on the reasoning (this file's own .td comment) that
+   $dst/$lhs/$rhs already account for the entire 2-register GPR file, so
+   nothing else could be live in AC0/AC1 across the instruction anyway.
+   That reasoning breaks whenever $lhs and $rhs get allocated to the
+   *same* physical register -- which happens whenever they're literally
+   the same value, e.g. `HALVE(Offset, Two)` when a struct field's byte
+   offset happens to equal 2, the halving divisor, and SelectionDAG's
+   own CSE unifies the two operand references into one node/register.
+   With only one of the two GPRs actually touched by the operands, the
+   allocator is free to keep some *other* live value in the leftover
+   register across the instruction -- but the real hardware sequence
+   unconditionally zeros AC0 and loads AC1 regardless of what $lhs/$rhs
+   occupy, silently destroying that other value. Confirmed empirically
+   on ct00018: a struct pointer, loaded into AC0 and needed again right
+   after computing a field's word offset via exactly this HALVE(2, 2)
+   shape, was gone by the time the two needed combining. Fixed by also
+   unconditionally saving/restoring AC0 and AC1 around the MUL/DIV
+   sequence, the same `_SP`-stack mechanism AC2 already uses -- except
+   for whichever of AC0/AC1 *is* $dst, which must keep the just-computed
+   real answer rather than have its pre-instruction value popped back
+   over it (skip that one LDABSI specifically, but still advance `_SP`
+   past its unused saved slot, so the stack stays balanced either way).
+   Deliberately not the more obvious-looking fix (declaring AC0/AC1 as
+   `Defs` on the pseudo, so the allocator itself knows never to keep
+   anything else alive across it) -- the .td file's own comment already
+   documents that exact fix being tried previously and breaking
+   allocation outright ("ran out of registers", from double-counting
+   register demand against $dst/$lhs/$rhs's own explicit operands).
+   This fix is entirely local to the post-RA expansion instead, touching
+   neither the .td Defs list nor any allocator decision. Moved ct00018
+   and ct00149 (FAIL) and ct00157 (HANG -- the same silent corruption,
+   just landing on an infinite loop instead of a wrong value this time)
+   to stable_pass.txt; confirmed no regressions via a full suite re-run.
+
+9. `EclipseAsmPrinter::emitGlobalVariable`'s struct-initializer handling
+   (see fix #2 above, which first introduced it) only ever flattened a
+   *flat* `ConstantStruct` whose members were all directly a scalar
+   (ConstantInt) or a global's address (GlobalValue) -- anything with a
+   *nested* aggregate member (a sub-struct, a union, a nested array) fell
+   straight through to the generic "TODO: unsupported initializer"
+   zero-word placeholder, exactly as fix #2's own comment already
+   flagged for ct00204's HFA-style struct. Confirmed this is far more
+   common than that one ABI-test case, and far quieter than a clean
+   all-zero fallback in most instances: `struct S2 { int a, b; union
+   {int c, d;}; struct S1 s; } v = {1, 2, 3, {4, 5}}` (ct00050, a nested
+   union *and* a nested struct member) read every single field wrong,
+   including `.a` (offset 0) -- not just zeroed, but genuine garbage
+   (neighboring globals' data), because the *numeric ConstantArray* case
+   right above it had an even quieter version of the identical gap:
+   `emitArrayElements`'s callback only recognized a bare `ConstantInt`
+   array element, silently emitting `0` for anything else (a nested sub-
+   array) while still reporting the array as fully handled -- so `S a[1]
+   = {{1, {2, 3}}}` (ct00091, an array of structs whose own member is
+   itself an array) or `int arr[][3][5] = {...}` (ct00151, a genuinely
+   multi-dimensional array) got the right *word count* by coincidence
+   (both cases happen to need the same total number of words either way)
+   but wrong content past the first nested element.
+   Fixed with one general mechanism instead of patching each shape
+   separately: `flattenConstant` (new, EclipseAsmPrinter.cpp) recurses
+   through any combination of ConstantStruct/ConstantArray/
+   ConstantDataArray/ConstantAggregateZero down to their scalar
+   (ConstantInt/GlobalValue) leaves, in address order, backed by
+   `countScalarWords` (walks the LLVM Type tree the same way, purely to
+   know how many zero words a *nested* ConstantAggregateZero member
+   needs — that constant kind carries no per-element list of its own to
+   recurse into). `emitGlobalVariable`'s old separate numeric-
+   ConstantArray, array-shaped-ConstantAggregateZero, and flat-
+   ConstantStruct cases are now all one call into this, still using the
+   same "only the first flattened word keeps the real symbol name, nothing
+   ever addresses a later one by name" convention the array case
+   originated. Bails out (falls to the same "unsupported" placeholder as
+   before) the moment it hits a constant kind it doesn't understand (e.g.
+   a float/double member) rather than emitting a partial/misaligned word
+   sequence. Moved ct00050/91/148/150/151 to stable_pass.txt outright;
+   confirmed no regressions via a full suite re-run. ct00204 is
+   unaffected -- its build failure is a clang frontend diagnostic
+   ("integer literal is too large") that never reaches this code at all.
+
+10. The ADD-combine's byte->word halving (fix's own long header comment
+    above, and the WORD_ADD/HALVE machinery it feeds) applied its /2
+    correction to *any* runtime pointer-plus-offset address it
+    recognized, with no check for what element type the resulting
+    address actually points at. That correction is only valid for i16
+    (or wider) elements, where GEP's generic byte-scaling really does
+    double what should've been a word offset -- an i8/`char` element is
+    already exactly one word wide on this backend (see this file's own
+    header comment and dgasm's VARIABLE_STRING format), so a byte index
+    into a `char` array is already correct as GEP computed it, and
+    applying the same /2 on top introduces a wrong halving where none
+    was needed. Confirmed on two different Base shapes hitting the
+    identical bug: `char *s = "abcdef"; s[1]` (a loaded-pointer base,
+    the ADD-combine's LOAD-base branch) read 'a' (s[0]) instead of 'b';
+    `char s[8] = "abcdef"; int i = 1; s[i]` (a FrameIndex/local-array
+    base, a completely different branch of the same combine) read 'a'
+    instead of 'b' too -- both the exact truncating-integer-division
+    symptom of a real index silently being halved (1/2=0, 2/2=1, ...).
+    Fixed with one check shared by every Base shape rather than
+    patching each branch separately: bail out of the whole combine, up
+    front, whenever the ADD directly feeds an i8-width load or store
+    (`LD/ST->getMemoryVT() == MVT::i8`) as its base pointer -- leaving
+    the address exactly as GEP's generic lowering already computed it,
+    correctly, for that case. Moved ct00058 (string-literal char
+    indexing) and ct00138 (a macro-forwarded char-pointer index) to
+    stable_pass.txt; confirmed no regressions via a full suite re-run.
+
+11. `EclipseAsmPrinter::emitGlobalVariable` never handled `ConstantFP`
+    at all -- any `float`/`double` global initializer (`double x = 100;`
+    -- `double` aliases `float`'s 32-bit soft-float layout on this
+    backend, see e.g. fix #9's own investigation of ct00119's IR)
+    fell straight through every existing case to the generic "TODO:
+    unsupported initializer" placeholder, silently reading back as 0.0
+    forever regardless of the real initializer value. Investigated as a
+    suspected 32-bit-comparison bug at first (`u32_gt`/`u32_lt` in
+    eclipse_rt.c's soft-float section appeared to ignore the high word
+    of a 32-bit unsigned compare) -- that theory turned out to be a
+    testing artifact (an accidental `unsigned int` typedef, 16-bit on
+    this target, instead of the real `unsigned long` u32 the runtime
+    actually uses -- 32-bit unsigned comparison itself is fine), but
+    isolating it required bisecting local-vs-global and literal-vs-
+    variable float operands, which is what actually surfaced the real
+    bug: `__ltsf2` gave the right answer for local/literal operands but
+    the wrong one the moment either operand was a global. Fixed by
+    giving `flattenConstant` (fix #9) a ConstantFP case: `bitcastToAPInt
+    ()` yields the exact 32-bit IEEE-754 bit pattern rt/eclipse_rt.c's
+    sf_bits()/sf_from_bits() (and every sf_* routine built on them)
+    already assume for a *runtime* float value, split into 2 words via
+    the same most-significant-first helper the wide-ConstantInt case
+    uses (factored out as `appendBitsAsWords` alongside this fix). Moved
+    ct00119/123 to stable_pass.txt; confirmed no regressions via a full
+    suite re-run.
+
+`ct00040` (calloc-based 8-queens solver) builds and runs fine but is
+genuinely slow, not broken -- it didn't finish in 5 minutes of
+wall-clock dgnova time in this session, so it lands in known_issues.txt
+as a HANG under screen_runtime.py's fixed 10s timeout convention like
+anything else that doesn't finish in time.
+
