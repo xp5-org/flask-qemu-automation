@@ -1,0 +1,763 @@
+================================================================================
+nova_fb -- mono framebuffer (FPGA mock) device for the SimH Nova, device 042
+================================================================================
+
+WHAT THIS IS
+------------
+A SimH Nova device that models an FPGA framebuffer card:
+
+  - 1 Mbit (65536 word / 131072 byte) of private display memory
+  - monochrome, up to 1024 x 1024, 640 x 480 on power-up
+  - a mono BITMAP mode and an MS-DOS style CHARACTER mode, switchable by the
+    program, with an 8x16 ASCII ROM the program can overload with its own font
+  - double buffered
+  - unconditionally accepts writes (no handshake, no flow control)
+  - dumps the front buffer to a 1-bit PNG every time the program presents
+  - and/or publishes it to a shared-memory live sink for a viewer to draw
+
+The PNG-per-frame is the point: it drops straight into the existing
+screenshot/OCR assertions used by the other tests in this repo, so a Nova
+program's display output can be asserted before the real hardware exists.
+
+The live sink is the other half, added later: PNGs are an excellent record and
+a poor screen, so SET FB LIVE gives the same frames to a viewer process as they
+are presented and pyhelpers/novafbmonitor.py draws them in a window. See LIVE
+VIEW below. The two sinks are independent -- either, both, or neither.
+
+Device code 042 (octal) was chosen because it is unused by stock SimH and sits
+inside the interruptable range (DEV_LOW=010 .. DEV_HIGH=051). Note 043 is the
+PIT (Eclipse only) -- do not move this to 043.
+
+
+WHAT IS IN THIS DIRECTORY
+-------------------------
+  bin/dgnova-fb            prebuilt, stripped Nova simulator with the device
+  src/nova_fb.c            the device source (drop into simh's NOVA/ dir)
+  src/nova_fb_device.patch complete diff vs upstream open-simh
+  demo/*.ini               seven SimH scripts that exercise the device:
+                             stripes256          explicit address per write
+                             stripes256_autoinc  same image via AUTOINC
+                             toprow              orientation (row 0 = top)
+                             full1024            full 1Mbit, address wrap
+                             bus8_bank           8-bit bus + A16 paging
+                             pixels              pixel mode, 256px diagonal
+                             pixel_ops           SET / CLEAR / XOR
+                             cursor              4-sprite 32x32 arrow, SET
+                             cursor_xor          same, XOR op
+                             rdos_fbdraw        boots RDOS (testlist drives it)
+  gen_cursor.py            generates the two cursor demos (do not hand-edit)
+  gen_charrom.py           generates src/nova_charrom.h, the built-in font
+  gen_text.py              generates the three character mode demos
+  gen_modeswitch.py        generates demo/modeswitch.ini -- ONE program with
+                           all three modes, switched from the console
+  src/nova_charrom.h       the 8x16 ASCII character ROM (generated, checked in)
+  gen_rdos_src.py          generates src/FBDRAW.SR + the paper-tape image
+  build_rdos_disk.py       builds rdos_d31_fb.dsk (stock RDOS + FBDRAW.SR)
+  rdos_d31_fb.dsk          RDOS disk with the source baked in
+  src/FBDRAW.SR / .ptp     RDOS assembly source, and its even-parity tape
+  __testlist__nova_fb_spritecursor.py
+                           flask entry, "nova fb sprite cursor" / sprite_cursor
+  __testlist__nova_fb_rdosdraw.py
+                           same test name, variant "rdos_draw"
+  __testlist__nova_fb_textmode.py
+                           same test name, variant "text_mode" -- runs
+                           modeswitch.ini and hands it to the person watching
+  verify_frames.py         decodes the demo PNGs and asserts exact bit patterns
+  verify_live.py           runs a demo with the live sink on and asserts the
+                           sink's frame is byte-identical to that frame's PNG
+  run_demos.sh             runs all demos then verifies -> "ALL CHECKS PASSED"
+  output/                  PNGs land here
+
+Quick check that the prebuilt binary works:
+
+    ./run_demos.sh
+
+Under the flask testrunner the test is "nova fb sprite cursor"
+(id nova_fb.__testlist__nova_fb_spritecursor). It does NOT boot RDOS -- each
+step runs a bare SIMH script that pokes a program into memory, runs it and
+halts. Three test_startnovasimh parameters make that possible, all added for
+this project and all optional (the nova_rdos tests are unaffected):
+
+    binary       /testsrc/sourcedir/nova_fb/bin/dgnova-fb
+    script_path  the demo .ini to run instead of a generated boot script
+    cwd          the project dir, so "set fb prefix=output/cursor" resolves
+    boot_rdos    False -- there is no Filename?/Date/Time sequence to drive
+
+A Nova has no VM framebuffer for the runner to screendump, so the card's PNG
+is put into the report explicitly with test_attach_screenshot:
+
+    {"action": "test_attach_screenshot",
+     "param": {"image_path": "{projbasedir}{projdir}/output/rdos0001.png",
+               "name": "fb", "scale": 2}}
+
+image_path may be a glob ("output/cursor*.png") and matches are attached in
+sorted order; scale nearest-neighbour upscales first, since a 256x256 1-bit
+frame is hard to read at native size in a browser. The image lands on whatever
+step index that action occupies, so put it after the run.
+
+Report assets are matched by FILENAME, not by anything the step returns:
+screenshot-<name>-<stepnum>[-<n>].(png|gif) in the runner's reports dir, where
+<name> must contain no '-' (the pattern is screenshot-[^-]+-(\d+)). That is why
+"name" is validated. reporthelper._move_assets sweeps them into the report
+subdirectory when the report is generated.
+
+The console steps assert the program ran to completion (HALT, FRAME:); the
+final test_hostbuild step runs "verify_frames.py cursor cursor_xor", which
+recomputes the expected composite independently and exits non-zero on any
+mismatched pixel. verify_frames.py takes check-group names as arguments
+(stripes, toprow, full, bank, autoinc, pixels, pixel_ops, cursor, cursor_xor,
+rdos) so a testlist can verify only the demos it actually ran; no arguments
+runs all.
+
+
+DRIVING THE CARD FROM RDOS -- YES, THIS WORKS
+---------------------------------------------
+The second variant (testtype "rdos_draw", same test name) runs a real RDOS
+program instead of poking memory from the SIMH console. It draws a filled
+128x96 rectangle with word writes and overlays a 16x16 XOR sprite cursor
+straddling the rectangle's corner, so the one cursor is visible against both
+the white fill and the black background.
+
+Nothing special was needed to make this work:
+  * A Nova has NO SUPERVISOR MODE, so an ordinary user program can issue IOT
+    to device 42 directly. There is no driver to install and no privilege to
+    acquire.
+  * The card never asserts Done and never interrupts (see gotcha 1), so RDOS
+    is completely undisturbed by it. This is the payoff for keeping Done clear.
+  * Stock rdos_d31.dsk already carries the whole toolchain: ASM.SV, RLDR.SV,
+    MAC.SV, EDIT.SV.
+
+Build chain, all live in the test: ASM FBDRAW -> "PROGRAM IS RELOCATABLE",
+RLDR FBDRAW -> FBDRAW.SV, then FBDRAW runs it. Assembled size is NMAX 000660
+(~432 words), trivially inside the 32KW unmapped ceiling.
+
+Two non-obvious things about getting source onto the disk (build_rdos_disk.py
+does both; you only need this when changing gen_rdos_src.py):
+
+  1. XFER stops with "LOAD $PTR, STRIKE ANY KEY." and waits for ONE keystroke
+     before pulling the tape. Miss it and the next command's first character is
+     eaten as that key -- "LIST FBDRAW.SR" silently became "IST FBDRAW.SR".
+  2. DG 8-level paper tape carries a PARITY BIT in channel 8 and RDOS checks
+     it. Plain ASCII and odd parity both give "PARITY ERROR: $PTR" plus a
+     silently corrupt file that then fails to assemble with a confusing
+     "END OF FILE WITHOUT '.END'". EVEN parity is what $PTR accepts.
+     gen_rdos_src.py emits src/FBDRAW.ptp with even parity.
+
+XFER will not overwrite: re-loading the source needs a pristine disk (or a
+DELETE first), which is why build_rdos_disk.py always starts from
+nova_rdos/rdos_d31.dsk. Re-running the test on an already-built disk is fine
+-- ASM and RLDR overwrite their own outputs, verified by running it twice.
+
+
+BUS INTERFACE
+-------------
+The Nova has no memory-mapped I/O. The card is reached by programmed I/O on
+device code 042 using the three I/O buffers (A/B/C) that every device code
+provides:
+
+  DOA ac,42    word mode:  load the address latch
+               pixel mode: load the X coordinate
+  DOB ac,42    word mode:  write AC into display memory at the latch
+               pixel mode: load Y + op, and PERFORM the pixel operation
+  DOC ac,42    load the control register
+  DIA ac,42    read back the address latch (or X in pixel mode)
+  DIB ac,42    read back the control register
+  DIC ac,42    read back the display memory word at the latch (back buffer)
+  NIOP 42      pulse P: swap buffers ("present") and dump the front buffer
+
+Control register (DOC):
+  bit 15  0100000   bus mode: 0 = 16-bit data, 1 = 8-bit data
+  bit 14  0040000   A16 bank select (8-bit mode only)
+  bit 13  0020000   AUTOINC: address latch auto-increments after DOB
+  bit 12  0010000   PIXEL: DOA/DOB are X / Y+op instead of address / data
+  bit 11  0004000   SPRITE: DOA/DOB are the sprite register port
+
+AUTOINC defaults OFF at reset, matching a card that wants an address with
+every write.
+
+Pixel mapping: bit 15 of a word is the LEFTMOST pixel; a set bit is lit
+(white). Row 0 is the TOP of the image. Row stride is WIDTH/16 words.
+Both of these are asserted by demo/toprow.ini + verify_frames.py.
+
+
+PIXEL MODE, AND WHY THE CARD SHOULD DO THE READ-MODIFY-WRITE
+------------------------------------------------------------
+Setting ONE pixel in a mono framebuffer is a read-modify-write of a 16-pixel
+word. The CPU can only do that if it can obtain the current word, which means
+either a shadow copy in Nova RAM or a read-back over the bus. Shadow copies do
+not fit:
+
+    1024x1024 shadow = 65536 words = 64 KW
+     512x512  shadow = 16384 words = 16 KW
+     256x256  shadow =  4096 words =  4 KW
+
+dgnova is an UNMAPPED Nova: 32 KW of user address space TOTAL, and the RDOS
+resident eats into that. A full-resolution shadow buffer is IMPOSSIBLE, and
+even 512x512 costs half the machine. So one of these must be true:
+
+  (a) the card does the bit insertion itself   <- pixel mode, recommended
+  (b) the card supports read-back of display memory  <- modelled on DIC
+  (c) resolution is kept small enough for a shadow buffer
+
+Cost of setting one scattered pixel:
+
+  pixel mode (card does RMW)        DOA + DOB + coord update      ~  4-6 instrs
+  CPU-side RMW via DIC read-back    addr calc + mask table
+                                    + DOA + DIC + OR + DOB        ~ 12-18 instrs
+  CPU shadow buffer at 1024x1024    impossible on a 32 KW machine
+
+Pixel mode is ~3x cheaper than CPU-side RMW AND removes the read-back path from
+the hardware entirely. On an FPGA the bit insert is nearly free. It also
+generalizes directly to sprites: the card already owns coordinates and a
+read-modify-write path, which is most of what a sprite blitter needs.
+
+  DOA = X (0..1023)
+  DOB = op in bits 14-13, Y in bits 9-0
+          op 0  SET    force pixel to 1
+          op 1  CLEAR  force pixel to 0
+          op 2  XOR    toggle pixel (the useful one for sprites/cursors)
+          op 3  reserved
+Off-screen coordinates are clipped in hardware and counted in the CLIPPED
+register.
+
+KEEP BOTH PATHS. Pixel mode is for scattered pixels only; it is 71x more
+expensive per pixel than word writes for solid fills:
+
+  pixel mode  ~5 instrs per pixel          = 5.0000 instrs/pixel
+  word mode   ~1.125 instrs per 16 pixels  = 0.0703 instrs/pixel
+
+
+SPRITES (4 units, 16x16), VIC-II STYLE
+--------------------------------------
+Sprite data is 1 BIT PER PIXEL, 16 words (one per row), fetched through a
+POINTER into the card's own display memory. A 0 bit is TRANSPARENT, so there
+is NO MASK PLANE. What a set bit does is chosen per sprite by the CTL op field,
+which is why one control bit replaces a whole second plane:
+
+  op 0  SET    solid, forces the pixel to 1
+  op 1  CLEAR  knockout, forces the pixel to 0
+  op 2  XOR    inverts -- a cursor visible over ANY background
+
+Sprite registers, address = (unit << 2) | reg, port AUTO-INCREMENTS:
+
+  0  PTR   word address of the 16 data words in display memory
+  1  X     signed; negative hangs the sprite off the left edge
+  2  Y     signed
+  3  CTL   bit 0 = enable, bits 2-1 = op
+
+Why the pointer model beats a data+mask plane pair, per sprite:
+
+                          mask-plane model      VIC-style pointer
+  storage                 32 words              16 words
+  register writes to load 35                    4
+  change shape            reload 32 words       1 write (repoint)
+  transparency            mask bit              free (0 bit)
+  visible on any bg       4-state encoding      CTL op = XOR
+
+The one thing it gives up: a single sprite can no longer mix opaque-black and
+opaque-white pixels, which is how a Mac arrow gets its white outline. Two ways
+back if you want that: layer two units (outline with CLEAR under body with
+SET -- still 32 words total, but only when you actually want it), or use XOR,
+which is what the mask was really buying.
+
+SPRITES ARE AN OVERLAY, NOT A BLIT. They are composited at present time and
+never written into display memory, so:
+  - moving a sprite costs TWO register writes (X, Y), not a blit
+  - there is no save/restore of the background, and no damage to repair
+  - the framebuffer underneath is untouched, so a redraw cannot tear the cursor
+demo/cursor.ini asserts this directly: after the cursor moves, the site it
+occupied in frame 1 is pure background in frame 2.
+
+Cost of moving the cursor one step:
+  overlay sprite            2 register writes                    ~6 instrs
+  save/restore blit 32x32   read 64 words back + rewrite twice   ~400+ instrs
+Unit 0 has the highest priority; units are composited in reverse order.
+
+Loading a sprite is ordinary word writes to display memory (the bitmap can
+live anywhere the frame does not, e.g. word 0100000 at 256x256) plus 4 register
+writes. gen_cursor.py builds a 32x32 arrow from four 16x16 units, one per
+quadrant, and emits demo/cursor.ini and demo/cursor_xor.ini.
+
+
+AUTO-INCREMENT IS NOT IN TENSION WITH PER-WRITE ADDRESSING
+----------------------------------------------------------
+Requiring an address on every write and offering auto-increment are not
+mutually exclusive. Random access under AUTOINC simply issues DOA before each
+DOB -- exactly what a card without auto-increment forces you to do anyway.
+Auto-increment only removes the re-latch from SEQUENTIAL runs, so it is a
+strict superset of the explicit-address model and costs the FPGA one counter.
+
+Measured on the demos (full 1024x1024 blit):
+
+  explicit addr/write, naive    DOA+DOB+INC+DSZ+JMP  5.000/word   327680 instrs
+  explicit addr/write, 16x      DOA+DOB+INC +2/16    3.125/word   204800 instrs
+  AUTOINC, naive                DOB+DSZ+JMP          3.000/word   196608 instrs
+  AUTOINC, 16x unrolled         DOB +2/16            1.125/word    73728 instrs
+
+Auto-increment is 2.78x cheaper on sequential fills for one counter of FPGA
+logic. demo/stripes256.ini and demo/stripes256_autoinc.ini produce a
+byte-identical image by both routes; verify_frames.py asserts that.
+
+PIN COUNT AND WHETHER PAGING IS NEEDED
+--------------------------------------
+1024 x 1024 mono = 1048576 bits = 131072 bytes = 65536 words.
+
+                        16-bit bus          8-bit bus
+  data pins             16                  8
+  address pins          16                  17
+  addressable units     65536 words         131072 bytes
+  fits one Nova AC?     YES, exactly        NO, one bit short
+  paging needed?        NONE                REQUIRED (A16 from control reg)
+  instrs/full frame     196608 naive        393216 naive
+                         73728 unrolled 16x  147456 unrolled 16x
+
+1 Mbit of mono is EXACTLY 65536 words, which is EXACTLY a 16-bit address. With
+a 16-bit bus the address latch is one DOA and there is no bank register and no
+paging. With an 8-bit bus you need 17 address bits, the Nova can only present
+16 in one accumulator, so the 17th has to come from the control register --
+that is a paging scheme, and it also doubles the instruction count per frame.
+
+Recommendation for this host: 16-bit bus, 16-bit address.
+
+Frame cost at real Nova speeds (16x unrolled DOB, full 1024x1024 refresh):
+  0.8 us/instr  -> 0.06 s  (16-bit)   0.12 s  (8-bit)
+  1.2 us/instr  -> 0.09 s  (16-bit)   0.18 s  (8-bit)
+  2.4 us/instr  -> 0.18 s  (16-bit)   0.35 s  (8-bit)
+So a full-screen refresh is roughly 2-10 fps. Partial/dirty-rect updates are
+what you would actually ship.
+
+
+CHARACTER MODE (80x25 VGA text, and the character ROM)
+------------------------------------------------------
+The card has two ways to put something on screen. BITMAP mode is the original
+one: the program writes pixels or words and present() shows them. CHARACTER
+mode is the second: the program writes CHARACTER CODES into a text buffer, and
+present() GENERATES the frame from those codes and a font. The pixel and word
+write paths still work in char mode -- they are simply not what is on screen.
+
+It is modelled on MS-DOS VGA, because that is the text display everyone has
+example code for. The thing to know up front, because the arithmetic looks
+wrong otherwise: DOS 80x25 text is NOT 640x480. It is 720x400 with a NINE dot
+cell. 640x480 with an eight dot cell is 80x30, which is what a mode 12h console
+is. Both come from one rule:
+
+    COLS = WIDTH / cell width          ROWS = HEIGHT / 16
+
+    720x400, 9 dot cell -> 80 x 25     mode 3/7, DOS text
+    640x480, 8 dot cell -> 80 x 30     mode 12h console
+    256x256, 8 dot cell -> 32 x 16     (the small demos, unchanged)
+
+Read COLS and ROWS back with "e fb cols" / "e fb rows" -- they are computed at
+present time from WIDTH, HEIGHT and the cell width, so they are the card's own
+answer rather than the test's assumption.
+
+THE TEXT REGISTER PORT. CTL bit 10 (0002000) switches DOA/DOB to a three
+register port, laid out exactly like the sprite port: DOA selects a register,
+DOB writes it and auto-increments, so loading all three is one DOA and three
+DOBs.
+
+    0  TEXTPTR   word address of the text buffer in display memory
+    1  CHARPTR   word address of the glyph table, or 0 for the built-in ROM
+    2  TCTL      bit 0 ENABLE   char mode on
+                 bit 1 CELL9    nine dot cell (DOS text) instead of eight
+                 bit 2 LINEGFX  repeat column 8 across codes 0300-0337
+
+A CELL IS ONE WORD, the same shape as VGA's code+attribute pair at B8000:
+
+    bits 7-0   character code, indexes the glyph table
+    bit 8      REVERSE    swap ink and paper for this cell
+    bit 9      UNDERLINE  fill the cell's last scanline
+    bits 15-10 reserved
+
+Cell (row, col) is at TEXTPTR + row * COLS + col. The text buffer is ordinary
+display memory, so it is written with ordinary word writes -- AUTOINC makes a
+line of text one DOA and N DOBs -- and there is no separate text write path.
+
+There is no hardware cursor, deliberately: a cursor is an XOR sprite over the
+text, using the sprite units that already exist. One less mechanism, and it can
+be any shape, not just a block.
+
+THE CHARACTER ROM is 8x16, one word per scanline, bits 15-8, bit 15 leftmost --
+the same bit order as the framebuffer and the sprites, so every bitmap on this
+card reads the same way. 16 words per glyph, 256 glyphs, so a full table is
+4096 words:
+
+    glyph g, scanline r   is at   CHARPTR + (g * 16) + r
+
+CHARPTR = 0 selects the built-in ROM (src/nova_charrom.h, generated by
+gen_charrom.py from DejaVu Sans Mono at 13px; codes 040-0176 printable ASCII,
+everything else blank). Any other value points at the PROGRAM'S OWN table in
+display memory, so overloading the font costs one register write and needs no
+cooperation from the card. demo/text_font.ini does exactly that, and
+verify_frames.py asserts the custom 'A' rendered and the ROM's did not.
+
+Two details worth knowing:
+
+  An undefined glyph is a BLANK CELL, not a fallback. A custom table that
+  defines a few codes and leaves the rest zero renders as a screen of stray
+  marks -- which, watched live, is indistinguishable from the run having
+  crashed and cleared the screen. demo/text_font.ini therefore derives its
+  whole font from the ROM (thickened, the VGA bold rule) for every character
+  it prints, so the override is legible as well as obviously not the ROM.
+
+  The 9th column is GENERATED, not stored. The font is 8 wide; in a 9 dot cell
+  the extra column is blank, except that with LINEGFX set codes 0300-0337
+  repeat column 8 so box-drawing characters join up across cells. That is
+  VGA's Line Graphics Enable, and it is why DOS box drawing has no seams.
+
+  The underline is on the cell's LAST scanline. VGA puts it where the CRTC's
+  Underline Location register says, 13 by default; this card has no CRTC to
+  reprogram, and the font's baseline is on scanline 13, so 13 would read as a
+  strikethrough. The only deliberate deviation from VGA in char mode.
+
+  SET FB WIDTH is still a multiple of 16 (720 is 45 words), and char mode
+  CLEARS the frame before generating it, so nothing from a previous bitmap
+  survives a switch to text.
+
+
+ONE PROGRAM, THREE MODES (demo/modeswitch.ini)
+-----------------------------------------------
+The three text demos above are three SCRIPTS: each loads its own copy of the
+same loader with different data, presents one frame and halts. That shows char
+mode three times without ever switching a mode, and it is not something a
+person can drive.
+
+gen_modeswitch.py emits demo/modeswitch.ini: ONE Nova program, loaded once,
+owning all three modes and switching between them on a character typed at the
+console. It does not halt.
+
+    1   80x25, nine dot cell, built-in ROM, line graphics
+    2   90x25, eight dot cell, built-in ROM
+    3   80x25, nine dot cell, the program's own font (CHARPTR)
+
+Type the digit and RETURN; the program echoes, rewrites the text buffer, loads
+the three text registers and presents. Every switch is therefore a new frame in
+the live sink AND a new output/modeswitch####.png, so the mode change is
+visible in the monitor window the moment RETURN is pressed and is still
+assertable afterwards.
+
+ALL THREE ARE 720x400, deliberately. A program cannot change the card's
+resolution: WIDTH and HEIGHT are SET FB settings, and the text port is
+TEXTPTR / CHARPTR / TCTL and nothing else. So these modes differ in exactly
+what a program can reach -- cell width, line graphics, and the font -- and mode
+2 is 90x25 (720/8) rather than gen_text's 80x30, which needed a 640x480 card.
+Giving the program a geometry register would mean a fourth text register and a
+rebuilt simulator, not a different program.
+
+The program blocks on device 10 (TTI) with SKPDN / DIAC, echoes to device 11
+(TTO), and is assembled by the small two-pass assembler inside gen_modeswitch.py
+rather than hand-written as octal deposits -- it has four subroutines and a
+command parser, which is more PC-relative arithmetic than is safe to do by
+hand. The output is still nothing but "d" lines.
+
+Driving it from a testlist, and from a keyboard at the same time:
+
+    test_start_novafb_monitor   the pygame window -- the card's output
+    test_open_nova_terminal     an xterm on the SAME SIMH console the testlist
+                                is driving (pyhelpers/novaterm.py over the
+                                relay socket NovaSimhInstance.open_console_relay
+                                serves), so test_sendnovacommand's sends appear
+                                in the window and the person watching can keep
+                                pressing 1/2/3 into the same running program
+
+    python3 verify_frames.py modeswitch
+
+recomputes all four frames (1, 2, 3, then 1 again) from the ROM and the layouts
+and diffs every pixel. Frame 4 is what proves a switch RESTORES a mode rather
+than leaving the wider screen's cells behind.
+
+
+LIVE VIEW (SET FB LIVE, and the pygame monitor)
+-----------------------------------------------
+A PNG per present is an artifact, not a display: the frames only exist after
+the fact and only where a PREFIX was set. SET FB LIVE=<path> adds a second
+sink. present() copies the front buffer into a shared memory file; any number
+of reader processes mmap it and redraw. Nothing is consumed, nothing is
+acknowledged, and the simulator never blocks on a reader -- like a real video
+output, a viewer that is not looking simply misses frames.
+
+    ./bin/dgnova-fb some.ini            # with "set fb live=/dev/shm/novafb"
+    python3 /testsrc/pyhelpers/novafbmonitor.py --live /dev/shm/novafb
+
+The window MATCHES THE CARD'S RESOLUTION: 720x400 of framebuffer is a 720x400
+window, and every pixel in the window is a pixel the card presented. No
+padding, no bars. When the guest changes mode the window changes with it, the
+way a monitor re-syncs.
+
+--scale multiplies that -- a 256x256 frame at 2x is a 512x512 window -- and 0,
+the default, picks the largest integer zoom that still fits the X display
+(capped at 4x). That is what makes the small demos legible without a testlist
+having to know what mode they run in; pass --scale 1 for exact 1:1 pixels.
+
+One consequence is visible and worth knowing: pygame's set_mode hands back a
+NEW X window every time it is called, so a mode change closes the old window
+and opens a new one, which does not keep its position and jumps to the front.
+That is the price of the window tracking the resolution. It is why the size is
+set only when the mode or the zoom actually changes, never per frame -- doing
+it per present would make the viewer unusable.
+
+WIRE FORMAT -- 16 little-endian uint32s, then the payload at byte 64:
+
+    0  MAGIC "NVFB"   3  WIDTH    6  BYTES (payload in use)
+    1  VERSION (1)    4  HEIGHT   7  SEQ   (seqlock)
+    2  FORMAT         5  STRIDE   8  FRAME (matches the FRAME register)
+
+The file is a fixed 64 + 4 MiB whatever the mode -- 4 MiB is 1024x1024 at
+32bpp, the largest frame this card could present in ANY future pixel format --
+so a viewer maps it once and never re-maps on a mode change. FORMAT is 1
+(packed 1bpp) today. Adding RGB to the card means adding a FORMAT code and a
+branch in novafbhelpers.frame_to_rgb; the protocol and the viewer's window
+logic do not change.
+
+Mono is stored exactly as the PNG and PBM rasters store it (bit 15 of a word is
+the leftmost pixel, row = WIDTH/8 bytes), so the same code unpacks either. That
+is asserted, not assumed: the live payload is compared byte-for-byte against
+the PNG the same present wrote.
+
+SEQ is a seqlock rather than a lock, because a simulator must never block on a
+viewer: it is odd while present() is copying. A reader loads SEQ, reads the
+frame, loads SEQ again, and discards the frame if either sample was odd or the
+two differ. NovaFbLive.read() does this and returns None on a torn read; the
+next call gets a whole frame.
+
+SEQ CONTINUES ACROSS RUNS against the same sink -- SET FB LIVE adopts the
+counter already in the file instead of restarting it (and steps a stale odd
+value, meaning the last writer died mid-copy). That matters because one window
+normally watches several simulator runs in a row: with a restarted counter, the
+second run's first frame carries the same (SEQ, FRAME) pair as the first run's
+last one, and a reader deciding "is this new?" from those counters alone would
+suppress it -- leaving the window showing the previous run, at the previous
+resolution. NovaFbLive additionally treats a geometry change as new, so a mode
+switch cannot be swallowed even by a writer that does restart.
+
+The reader half lives in the runner, not here:
+
+    pyhelpers/novafbhelpers.py       NovaFbLive (mmap reader), frame_to_rgb
+    pyhelpers/novafbmonitor.py       the pygame window (run it directly)
+    pyhelpers/novafbmonitor_proc.py  runs that window as a child process
+
+From a testlist, live_path on test_startnovasimh turns the sink on and
+test_start_novafb_monitor opens the window on it -- start the monitor FIRST,
+since it waits for the sink rather than creating it, and it closes itself when
+the simulator exits and the sink goes away:
+
+    {"action": "test_start_novafb_monitor",
+     "param": {"live_path": "{live_sink}", "scale": 0,
+               "require_success": False}},
+    {"action": "test_startnovasimh",
+     "param": {..., "live_path": "{live_sink}"}},
+
+The sink path belongs to the RUN, not to the program, which is why it is a
+CONFIG scalar and injected by NovaSimhInstance (it wraps the script with "set
+fb live=" and "do <script>") rather than written into demo/*.ini -- those are
+generated by gen_cursor.py and shared with run_demos.sh.
+
+keep_open leaves the window up after test_terminate_all, for whoever is
+watching to close with Q. Worth setting on a testlist whose demos halt in
+milliseconds: text_mode's three demos run in about ten seconds end to end, so
+without it the window exists only for that long and is easy to miss entirely.
+
+require_success=False is the sensible default for the viewer: it is for the
+human watching, and a headless container has no window to open. The assertions
+are still the PNGs. The window needs pygame (in requirements.txt) and an X
+display; it opens on the xrdp session displayhelpers.resolve_display finds,
+like every other emulator window in the suite. On a container built before
+pygame was added: /opt/venv/bin/pip install pygame.
+
+All three testlists are wired for it, with separate sink paths so they can run
+at once without fighting over one window. A caveat worth knowing: the demo scripts
+halt in milliseconds, so against sprite_cursor the window shows the final frame
+rather than motion. It earns its keep against rdos_draw, which boots RDOS and
+assembles/links/runs FBDRAW live -- a minute and a half with the screen up, the
+frame appearing at the moment the program presents it.
+
+
+SIMULATOR COMMANDS
+------------------
+  SET FB WIDTH=n       frame width in pixels, must be a multiple of 16, <=1024
+                       (default 640; 720 for DOS 80x25 text)
+  SET FB HEIGHT=n      frame height in pixels, <=1024 (default 480)
+  SET FB PREFIX=path   PNG output path prefix; frames become <prefix>NNNN.png
+                       (unset = no dump, device still works)
+  SET FB LIVE=path     shared memory file a viewer mmaps to watch the card
+                       live (unset = no sink, device still works). Independent
+                       of PREFIX; see LIVE VIEW.
+  SET FB DISABLED      remove the device entirely
+  SHOW FB              show current settings
+
+Registers (examine with "e fb <name>"):
+  ADDR    address latch          CTL     control register
+  TEXTPTR text buffer address    CHARPTR glyph table (0 = built-in ROM)
+  TCTL    text control           TADDR   text reg latch
+  COLS    text columns (RO)      ROWS    text rows (RO)
+  X       pixel X latch          CLIPPED off-screen pixel ops rejected
+  SADDR   sprite reg latch       SPTR/SX/SY/SCTL   per-sprite arrays [4]
+  WIDTH   frame width            HEIGHT  frame height
+  FRAME   frames presented       WRITES  writes since last present
+
+WIDTH/HEIGHT are validated: (WIDTH/16)*HEIGHT must fit in 65536 words.
+
+
+================================================================================
+HOW TO REBUILD THE BINARY MANUALLY
+================================================================================
+Built and verified against open-simh commit:
+
+    a1f57fa3738ed31148d31126ba1a7278ff845c6d   (2026-07-03)
+
+Toolchain used: gcc 14.2.0 on Ubuntu, no extra packages needed beyond what the
+test container already has. libpng and zlib are already picked up by simh's
+makefile, which is what the PNG dump uses.
+
+--- OPTION A: apply the patch -------------------------------------------------
+
+    git clone https://github.com/open-simh/simh
+    cd simh
+    git checkout a1f57fa3738ed31148d31126ba1a7278ff845c6d
+    git apply /testsrc/sourcedir/nova_fb/src/nova_fb_device.patch
+    make nova
+    # binary lands in BIN/nova
+    strip BIN/nova
+    cp BIN/nova /testsrc/sourcedir/nova_fb/bin/dgnova-fb
+
+--- OPTION B: patch by hand (4 edits) -----------------------------------------
+
+1. Copy the device source and the generated character ROM in:
+
+       cp /testsrc/sourcedir/nova_fb/src/nova_fb.c      simh/NOVA/nova_fb.c
+       cp /testsrc/sourcedir/nova_fb/src/nova_charrom.h simh/NOVA/nova_charrom.h
+
+2. NOVA/nova_defs.h -- four one-line additions.
+
+   a) next to the other device numbers, above DEV_PIT:
+        #define DEV_FB          042
+
+   b) next to the other INT_V_ bits, above INT_V_PIT (bits 0-1 are free
+      upstream; this uses bit 1):
+        #define INT_V_FB        1
+
+   c) next to the other INT_ masks, above INT_PIT:
+        #define INT_FB          (1 << INT_V_FB)
+
+   d) next to the other PI_ masks, above PI_PIT:
+        #define PI_FB           0000002
+
+3. NOVA/nova_sys.c -- two additions.
+
+   a) with the other externs (near "extern DEVICE alm_dev;"):
+        extern DEVICE fb_dev;
+
+   b) in the sim_devices[] array, before the closing NULL:
+        &fb_dev,
+
+4. makefile -- add the source to the NOVA file list (around line 1486).
+   Continue the previous line with a backslash and append:
+
+        NOVA = ${NOVAD}/nova_sys.c ... ${NOVAD}/nova_qty.c \
+                ${NOVAD}/nova_fb.c
+
+Then:
+
+    make nova
+
+A correct build prints "*** Good Registers in NOVA simulator." and compiles
+with no warnings (simh builds with -Werror).
+
+Verify:
+
+    cd /testsrc/sourcedir/nova_fb && ./run_demos.sh
+
+Expected last line: ALL CHECKS PASSED
+
+
+================================================================================
+GOTCHAS
+================================================================================
+
+1. DONE MUST STAY CLEAR. This device must never assert Busy or Done.
+   DEV_UPDATE_INTR derives int_req straight from dev_done, and dev_disable is
+   recomputed from the priority mask on every MSKO (see mask_out() in
+   nova_cpu.c), so a device CANNOT durably opt out of interrupts. A device that
+   holds Done set will interrupt forever once RDOS turns interrupts on. Since
+   the card unconditionally accepts writes there is no completion event to
+   signal, so holding Done clear is also the honest model.
+   Consequence: SKPDN 42 never skips. Software must not poll this device.
+
+2. SIMH REJECTS TRAILING COMMENTS in command files. This is legal:
+        ; comment on its own line
+        d 100 20050
+   This is NOT -- it fails with "Invalid argument", silently leaves memory at
+   zero, and then "go" runs zeros forever:
+        d 100 20050    ; LDA 0,50
+   The demo .ini files keep all comments on their own lines for this reason.
+
+3a. run_demos.sh uses CHECKS, not GROUPS, for its check-group list. GROUPS is a
+   bash BUILTIN array (the user's group ids); assigning to it is silently
+   ignored, so "verify_frames.py $GROUPS" passed the literal gid 1001.
+
+3. SET ... = VALUE IS UPPERCASED unless the MTAB entry sets MTAB_NC. The
+   PREFIX option uses MTAB_NC so output paths keep their case. If you add new
+   string-valued options, do the same or your paths will be mangled.
+
+4. The stock vendored simulator at /testsrc/disk_artifacts/bin/dgnova does NOT
+   have this device -- every "set fb ..." line would fail against it. This
+   project ships its own build as bin/dgnova-fb, and the testlist selects it
+   with the "binary" parameter (see below). Do not replace the shared dgnova.
+
+
+================================================================================
+INSTRUCTION ENCODINGS USED BY THE DEMOS
+================================================================================
+Nova I/O instruction layout (bit 0 = MSB):
+  bits 0-2 opcode 011   bits 3-4 AC   bits 5-7 transfer   bits 8-9 pulse
+  bits 10-15 device code
+
+  061042   DOA 0,42     load address latch (or pixel X) from AC0
+  062042   DOB 0,42     write AC0                          (NOTE the AC field --
+  066042   DOB 1,42     write AC1                           these differ only
+                                                            by bits 3-4)
+  063042   DOC 0,42     load control register from AC0
+  060342   NIOP 42      pulse P -- present
+  063077   HALT         (this is DOC 0,77, the CPU device)
+
+ALC (arithmetic/logic) layout:
+  bit 0 = 1   bits 1-2 ACS   bits 3-4 ACD   bits 5-7 function
+  bits 8-9 shift   bits 10-11 carry   bit 12 no-load   bits 13-15 skip
+
+  101400   INC 0,0      AC0 = AC0 + 1 (the address/coordinate step)
+
+Memory reference layout:
+  bit 0 indirect   bits 1-2 opcode   bits 3-4 AC   bits 6-7 index   bits 8-15 disp
+
+  020050   LDA 0,50     AC0 <- page zero 050
+  024051   LDA 1,51     AC1 <- page zero 051
+  014053   DSZ 53       decrement page zero 053, skip when it reaches zero
+  000103   JMP 103
+
+The blit loop WITHOUT auto-increment is five instructions per word
+(demo/stripes256.ini):
+
+  102:  DOA 0,42        latch address from AC0
+  103:  DOB 1,42        write the data word
+  104:  INC 0,0         AC0 = AC0 + 1
+  105:  DSZ 53          decrement counter, skip when zero
+  106:  JMP 102
+
+WITH auto-increment it is three (demo/stripes256_autoinc.ini) -- the DOA and
+the INC both leave the loop:
+
+  105:  DOB 1,42        write, latch auto-increments
+  106:  DSZ 53          decrement counter, skip when zero
+  107:  JMP 105
+
+Unrolling the DOB 16x drops these to ~3.125 and ~1.125 instructions per word
+respectively, which is where the "unrolled" numbers above come from.
+
+The pixel loop is two IOT per pixel plus the coordinate step
+(demo/pixels.ini -- X and Y are both AC0, hence a diagonal):
+
+  103:  DOA 0,42        X = AC0
+  104:  DOB 0,42        Y = AC0, op = SET; the card does the RMW
+  105:  INC 0,0
+  106:  DSZ 53
+  107:  JMP 103

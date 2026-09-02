@@ -1,0 +1,102 @@
+» ÆBDÒA× -- äráw á filleä rectáîçle áîä oöerláù á óðrite cõróor.
+» GÅNÅÒAÔÅD BY çeî_räoó_órc.ðù -- äo îot eäit âù èáîä.
+»
+» Òõîó áó áî oräiîárù ÒDÏS ðroçráí. A Noöá èáó îo óõðeröióor íoäe¬ óo á õóer
+» ðroçráí cáî ióóõe ÉÏÔ to äeöice ´² äirectlù» tèe cárä îeöer áóóertó Doîe áîä
+» îeöer iîterrõðtó¬ óo ÒDÏS ió õîäiótõrâeä âù it.
+        .ÔÉÔÌ ÆBDÒA×
+        .ÅNÔ  ÆBDÒA×
+        .NÒÅÌ
+
+ÆBDÒA×: ÌDA 0¬ÃÔÌAÉ         » worä íoäe¬ áääreóó áõto-iîcreíeîtó
+        DÏÃ 0¬´²
+
+» ---- filleä rectáîçle: ±²¸ x 96 át (6´¬´¸©¬ ðõre worä writeó ----
+        ÌDA 0¬ÒADÒ          » AÃ0 ½ worä áääreóó of tèe firót row
+        ÌDA 3¬ÒÏ×S
+        SÔA 3¬ÒÃNÔ
+ÒÏ×ÌP:  DÏA 0¬´²            » látcè tèió row'ó ótárt
+        ÌDA ±¬ÏNÅS
+        ÌDA 3¬N×ÏÒD
+        SÔA 3¬×ÃNÔ
+ÃÏÌÌP:  DÏB ±¬´²            » áõtoiîc wálëó ácroóó tèe row
+        DSZ ×ÃNÔ
+        ÊMP ÃÏÌÌP
+        ÌDA 3¬SÔÒÉD
+        ADD 3¬0             » AÃ0 ½ AÃ0 + ótriäe¬ îext row
+        DSZ ÒÃNÔ
+        ÊMP ÒÏ×ÌP
+
+» ---- coðù tèe ±6 worä cõróor âitíáð iîto tèe cárä'ó owî íeíorù ----
+        ÌDA 0¬SPÒBAS
+        DÏA 0¬´²
+        ÌDA ²¬ÃUÒPÔÒ
+        ÌDA 3¬SÉØÔN
+        SÔA 3¬ÃÃNÔ
+ÃUÒÌP:  ÌDA ±¬0¬²
+        DÏB ±¬´²
+        ÉNÃ ²¬²
+        DSZ ÃÃNÔ
+        ÊMP ÃUÒÌP
+
+» ---- óðrite reçióteró: PÔÒ¬ Ø¬ Y¬ ÃÔÌ ----
+        ÌDA 0¬ÃÔÌSPÒ        » óðrite reçióter ðort
+        DÏÃ 0¬´²
+        ÌDA 0¬ZÅÒÏ          » óðrite 0¬ reçióter 0» tèe ðort áõto-iîcreíeîtó
+        DÏA 0¬´²
+        ÌDA ²¬ÒÅGPÔÒ
+        ÌDA 3¬ÆÏUÒ
+        SÔA 3¬ÒGÃNÔ
+ÒÅGÌP:  ÌDA ±¬0¬²
+        DÏB ±¬´²
+        ÉNÃ ²¬²
+        DSZ ÒGÃNÔ
+        ÊMP ÒÅGÌP
+
+        NÉÏP ´²             » ðreóeît: ówáð âõfferó¬ coíðoóite¬ äõíð PNG
+
+        .SYSÔM
+        .ÒÔN
+        ÊMP  .-±
+
+ÃÔÌAÉ:  ²0000
+ÃÔÌSPÒ: ´000
+SPÒBAS: ±00000
+ÒADÒ:   ±´0´
+N×ÏÒD:  ±0
+ÒÏ×S:   ±´0
+SÔÒÉD:  ²0
+ÏNÅS:   ±·····
+ZÅÒÏ:   0
+SÉØÔN:  ²0
+ÆÏUÒ:   ´
+ÒÃNÔ:   0
+×ÃNÔ:   0
+ÃÃNÔ:   0
+ÒGÃNÔ:  0
+ÃUÒPÔÒ: ÃUÒSÏÒ
+ÒÅGPÔÒ: SPÒÅGS
+
+ÃUÒSÏÒ: ±00000
+        ±´0000
+        ±60000
+        ±·0000
+        ±·´000
+        ±·6000
+        ±··000
+        ±··´00
+        ±··600
+        ±···00
+        ±·6000
+        ±6·000
+        ±´·000
+        ±03´00
+        ±600
+        600
+
+SPÒÅGS: ±00000
+        ²·0
+        ²±0
+        5
+        .ÅND  ÆBDÒA×
+š

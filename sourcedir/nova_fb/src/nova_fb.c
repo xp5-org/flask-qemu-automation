@@ -1,0 +1,927 @@
+/* nova_fb.c: NOVA mono framebuffer (FPGA mock) simulator
+
+   fb           1Mbit monochrome double-buffered framebuffer, device code 042
+
+   Models an FPGA framebuffer card with 1Mbit (131072 byte / 65536 word) of
+   private display memory, organized as a mono bitmap up to 1024 x 1024.
+   The card is double buffered and unconditionally accepts writes, so it is
+   never busy, never interrupts, and has no flow control.
+
+   Programming model (device code 042):
+
+     DOA ac,fb    word mode:   load address latch
+                  pixel mode:  load X coordinate
+                  sprite mode: load sprite register address
+                  text mode:   load text register address
+     DOB ac,fb    word mode:   write AC to display memory at latch
+                  pixel mode:  load Y + op, and PERFORM the pixel operation
+                  sprite mode: write sprite register, address auto-increments
+                  text mode:   write text register, address auto-increments
+     DOC ac,fb    load control register
+     DIA ac,fb    read back address latch (or X in pixel mode)
+     DIB ac,fb    read back control register
+     DIC ac,fb    read back display memory word at the latch (back buffer)
+     NIOP fb      pulse P: swap buffers ("present"), publish the front buffer
+                  to the PNG dump and/or the live view sink
+
+   Control register (DOC):
+     bit 15 (0100000)   bus mode: 0 = 16 bit data, 1 = 8 bit data
+     bit 14 (0040000)   A16 bank select, 8 bit mode only
+     bit 13 (0020000)   AUTOINC: address latch auto-increments after DOB
+     bit 12 (0010000)   PIXEL: DOA/DOB are X / Y+op instead of address / data
+     bit 11 (0004000)   SPRITE: DOA/DOB are the sprite register port
+     bit 10 (0002000)   TEXT: DOA/DOB are the text register port
+
+   In 16 bit mode the latch is a word address 0..65535, which spans the whole
+   1Mbit exactly, so no paging is required.  In 8 bit mode the latch is a byte
+   address and the memory needs 17 bits of address, one more than the Nova can
+   present in a single accumulator; the extra bit A16 must come from the
+   control register, which is a bank/paging scheme.
+
+   AUTOINC defaults OFF, matching a card that requires an address with every
+   write.  Turning it on costs the card nothing and does not prevent random
+   access -- random writes simply issue DOA before each DOB -- but it removes
+   the re-latch from sequential blits.  demo/stripes256.ini (explicit address
+   per write) and demo/stripes256_autoinc.ini measure the difference.
+
+   Pixel mode (bit 12) exists because setting one pixel in a mono framebuffer
+   is a read-modify-write of a 16 pixel word.  A Nova cannot hold a 1024x1024
+   shadow buffer (64KW on a 32KW unmapped machine), so either the CPU reads the
+   word back over the bus (DIC) or the card does the bit insertion itself.
+   Pixel mode is the latter: the FPGA does the RMW, so the CPU needs no shadow
+   copy and no read-back.
+
+     DOA = X (0..1023)
+     DOB = op in bits 14-13, Y in bits 9-0:
+             op 0  SET    force pixel to 1
+             op 1  CLEAR  force pixel to 0
+             op 2  XOR    toggle pixel
+             op 3  reserved (ignored)
+   Off-screen coordinates are ignored and counted in the CLIPPED register,
+   matching a card that clips in hardware.
+
+   SPRITES (4 units, 16x16), VIC-II style.  Sprite data is 1 bit per pixel,
+   16 words (one per row), fetched through a POINTER into the card's own
+   display memory -- so a sprite is loaded with ordinary word writes, and its
+   shape is changed by repointing (one register write) rather than reloading.
+   A 0 bit is TRANSPARENT, so no mask plane is needed.  What a set bit does is
+   chosen per sprite by the CTL op field, which is why one control bit replaces
+   a whole second plane:
+
+     op 0  SET    solid, forces the pixel to 1
+     op 1  CLEAR  knockout, forces the pixel to 0
+     op 2  XOR    inverts -- a cursor visible over ANY background
+
+   Sprites are an OVERLAY composited at present time, never written into
+   display memory.  Moving one costs two register writes and cannot damage the
+   background, so there is no save/restore dance.  Unit 0 has highest priority.
+
+   CHARACTER MODE, modelled on MS-DOS VGA.  TCTL bit 0 switches the card from
+   showing the bitmap to GENERATING the frame from a text buffer, the way a VGA
+   text mode does -- the pixel and word write paths still work, they are simply
+   not what is on screen.  Sprites still overlay afterwards, so a text cursor
+   is an XOR sprite rather than a second cursor mechanism.
+
+   Geometry follows the VGA rule, COLS = WIDTH / cell width and ROWS =
+   HEIGHT / 16, so the two modes everyone has example code for fall out of it:
+
+     720x400, 9 dot cell -> 80x25   (mode 3/7, DOS text)
+     640x480, 8 dot cell -> 80x30   (mode 12h console)
+
+   A cell is one word: code in bits 7-0, REVERSE in bit 8, UNDERLINE in bit 9.
+   Glyphs are 8x16, one word per scanline (bits 15-8, bit 15 leftmost), 16
+   words per glyph, 256 glyphs.  CHARPTR = 0 selects the built-in ASCII ROM;
+   any other value points at the program's OWN glyph table in display memory,
+   which is how a program overloads the font -- one register write, no
+   cooperation needed from the card.
+
+   The 9th column of a 9 dot cell is generated, not stored: blank, except that
+   with LINEGFX set codes 0300-0337 repeat column 8 so box-drawing characters
+   join up across cells.  That is what VGA's Line Graphics Enable does.
+
+   Text registers, port auto-increments:
+     0  TEXTPTR   word address of the text buffer in display memory
+     1  CHARPTR   word address of the glyph table, or 0 for the built-in ROM
+     2  TCTL      bit 0 = char mode, bit 1 = 9 dot cell, bit 2 = LINEGFX
+
+   Sprite registers, address = (unit << 2) | reg, port auto-increments:
+     0  PTR   word address of the 16 data words in display memory
+     1  X     signed, may be negative to hang off the left edge
+     2  Y     signed
+     3  CTL   bit 0 = enable, bits 2-1 = op
+
+   Pixel order: within a word, bit 15 is the leftmost pixel.  A set bit is a
+   lit (white) pixel.  Row 0 is the top.  Row stride is WIDTH/16 words.
+*/
+
+#include "nova_defs.h"
+#include "nova_charrom.h"                            /* generated 8x16 ASCII */
+
+#if defined (HAVE_LIBPNG)
+#include <png.h>
+#endif
+
+#if !defined (_WIN32)                                   /* live view sink */
+#define FB_HAVE_LIVE    1
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+extern int32 int_req, dev_busy, dev_done, dev_disable;
+
+#define FB_WORDS        65536                           /* 1Mbit in words */
+#define FB_MAXDIM       1024
+
+/* Power-on geometry: 640x480 mono, the VGA mode everything can drive.  A
+   1024x1024 default was the card's maximum rather than a mode anyone would
+   pick, and every demo overrides this anyway with SET FB WIDTH/HEIGHT. */
+#define FB_DEFWID       640
+#define FB_DEFHGT       480
+
+/* Live view sink (SET FB LIVE=<path>).  present() publishes the front buffer
+   into a shared-memory file that a viewer process mmaps and redraws from, so
+   a running Nova has a screen instead of only a directory of PNG stills.
+
+   The payload is sized for the largest frame this card could EVER present in
+   any future pixel format (1024 x 1024 x 32bpp), not for today's mono, and
+   the geometry lives in the header.  A viewer therefore maps the file once,
+   at one fixed size, and never re-maps when the guest changes resolution --
+   or, later, colour depth.  Adding an RGB mode to the card means adding a
+   format code here, not changing the protocol.
+
+   Header is 16 little-endian uint32s; payload starts at FB_LIVE_HDR.
+   SEQ is a seqlock: odd while present() is writing, even when the frame is
+   whole.  A reader loads SEQ, reads, loads SEQ again, and retries if either
+   read was odd or the two differ. */
+
+#define FB_LIVE_MAGIC   0x4246564E                      /* "NVFB", LE */
+#define FB_LIVE_VERSION 1
+#define FB_LIVE_HDR     64                              /* bytes */
+#define FB_LIVE_MAX     (FB_MAXDIM * FB_MAXDIM * 4)     /* room for RGBA */
+#define FB_LIVE_SIZE    (FB_LIVE_HDR + FB_LIVE_MAX)
+
+#define FB_FMT_MONO1    1                               /* packed 1bpp */
+
+#define FBL_MAGIC       0                               /* header indices */
+#define FBL_VERSION     1
+#define FBL_FORMAT      2
+#define FBL_WIDTH       3
+#define FBL_HEIGHT      4
+#define FBL_STRIDE      5                               /* bytes per row */
+#define FBL_BYTES       6                               /* payload bytes */
+#define FBL_SEQ         7
+#define FBL_FRAME       8
+
+#define FBC_M_BUS8      0100000                         /* 8 bit bus mode */
+#define FBC_M_BANK      0040000                         /* A16, 8 bit mode */
+#define FBC_M_AUTOINC   0020000                         /* auto-increment */
+#define FBC_M_PIXEL     0010000                         /* pixel X/Y mode */
+#define FBC_M_SPRITE    0004000                         /* sprite reg port */
+#define FBC_M_TEXT      0002000                         /* text reg port */
+
+#define FBP_V_OP        13                              /* pixel op field */
+#define FBP_M_OP        03
+#define FBP_M_COORD     01777                           /* 10 bits, 0..1023 */
+
+#define FBP_OP_SET      0
+#define FBP_OP_CLEAR    1
+#define FBP_OP_XOR      2
+
+#define FB_NSPRITE      4                               /* sprite units */
+#define FB_SPR_DIM      16                              /* 16x16, 1 word/row */
+#define FB_SPR_STRIDE   4                               /* registers/sprite */
+
+#define FBS_R_PTR       0                               /* sprite registers */
+#define FBS_R_X         1
+#define FBS_R_Y         2
+#define FBS_R_CTL       3
+
+#define FBS_M_ENABLE    01                              /* CTL bit 0 */
+#define FBS_V_OP        1                               /* CTL bits 2-1 */
+#define FBS_M_OP        03
+
+/* Character mode.  Modelled on MS-DOS VGA, because that is the text display
+   everyone has example code for:
+
+     mode 3/7  80x25  is 720x400 with a NINE dot cell (the font is 8 wide, the
+                      9th column is generated), 16 scanlines
+     mode 12h  80x30  is 640x480 with an EIGHT dot cell, 16 scanlines
+
+   so both of those fall out of one rule -- COLS = WIDTH / cell width, ROWS =
+   HEIGHT / 16 -- rather than either being special-cased.  Set WIDTH=720
+   HEIGHT=400 with CELL9 for DOS text; leave the card at its 640x480 default
+   for the 80x30 console.
+
+   The 9th column is blank except for codes 0300-0337, where VGA repeats column
+   8 so box-drawing characters join up across cells.  That is the LINEGFX bit,
+   and it matches the Attribute Controller's Line Graphics Enable. */
+
+#define FBT_R_TEXTPTR   0                               /* text registers */
+#define FBT_R_CHARPTR   1
+#define FBT_R_CTL       2
+#define FBT_NREG        4                               /* port wraps at 4 */
+
+#define FBT_M_ENABLE    01                              /* CTL bit 0: char mode */
+#define FBT_M_CELL9     02                              /* CTL bit 1: 9 dot cell */
+#define FBT_M_LINEGFX   04                              /* CTL bit 2: repeat col 8 */
+
+#define FBT_M_CODE      0377                            /* cell bits 7-0 */
+#define FBT_M_REVERSE   0400                            /* cell bit 8 */
+#define FBT_M_ULINE     01000                           /* cell bit 9 */
+
+#define FBT_LG_FIRST    0300                            /* line graphics range */
+#define FBT_LG_LAST     0337
+
+/* VGA puts the underline on the scanline in the CRTC's Underline Location
+   register, 13 by default.  This card has no CRTC to reprogram, and our font's
+   baseline is on 13, so 13 would strike it; the underline is on the last
+   scanline instead, where it reads as an underline rather than a strikethrough.
+   A deliberate deviation, and the only one in char mode. */
+#define FBT_ULINE_ROW   (FB_CHAR_H - 1)
+
+static uint16 fb_back[FB_WORDS];                        /* written by CPU */
+static uint16 fb_front[FB_WORDS];                       /* "on screen" */
+
+int32 fb_spr_ptr[FB_NSPRITE] = { 0 };                   /* word addr of data */
+int32 fb_spr_x[FB_NSPRITE] = { 0 };                     /* signed, may be <0 */
+int32 fb_spr_y[FB_NSPRITE] = { 0 };
+int32 fb_spr_ctl[FB_NSPRITE] = { 0 };
+int32 fb_saddr = 0;                                     /* sprite reg latch */
+
+int32 fb_textptr = 0;                                   /* text buffer, words */
+int32 fb_charptr = 0;                                   /* glyphs; 0 = ROM */
+int32 fb_tctl = 0;                                      /* text control */
+int32 fb_taddr = 0;                                     /* text reg latch */
+int32 fb_cols = 0;                                      /* derived, RO */
+int32 fb_rows = 0;
+
+int32 fb_addr = 0;                                      /* address latch */
+int32 fb_x = 0;                                         /* pixel X latch */
+int32 fb_ctl = 0;                                       /* control register */
+int32 fb_wid = FB_DEFWID;                               /* frame width, px */
+int32 fb_hgt = FB_DEFHGT;                               /* frame height, px */
+int32 fb_frame = 0;                                     /* frames presented */
+int32 fb_writes = 0;                                    /* writes this frame */
+int32 fb_clipped = 0;                                   /* off-screen pixels */
+static char fb_prefix[CBUFSIZE] = "";                   /* PNG output prefix */
+static char fb_live_path[CBUFSIZE] = "";                 /* live view sink */
+#if defined (FB_HAVE_LIVE)
+static uint32 *fb_live = NULL;                          /* mmap base, or NULL */
+static uint8 *fb_live_pix = NULL;                       /* payload area */
+#endif
+
+int32 fb (int32 pulse, int32 code, int32 AC);
+t_stat fb_reset (DEVICE *dptr);
+t_stat fb_set_prefix (UNIT *uptr, int32 val, CONST char *cptr, void *desc);
+t_stat fb_show_prefix (FILE *st, UNIT *uptr, int32 val, CONST void *desc);
+t_stat fb_set_live (UNIT *uptr, int32 val, CONST char *cptr, void *desc);
+t_stat fb_show_live (FILE *st, UNIT *uptr, int32 val, CONST void *desc);
+static void fb_live_publish (void);
+t_stat fb_set_dim (UNIT *uptr, int32 val, CONST char *cptr, void *desc);
+t_stat fb_show_dim (FILE *st, UNIT *uptr, int32 val, CONST void *desc);
+static void fb_present (void);
+static void fb_pixel (int32 x, int32 y, int32 op);
+static int32 fb_eaddr (void);
+static void fb_swrite (int32 sa, int32 val);
+static void fb_composite (void);
+static void fb_twrite (int32 ta, int32 val);
+static void fb_text_render (void);
+static int32 fb_cellw (void);
+
+DIB fb_dib = { DEV_FB, INT_FB, PI_FB, &fb };
+
+UNIT fb_unit = { UDATA (NULL, 0, 0) };
+
+REG fb_reg[] = {
+    { ORDATA (ADDR, fb_addr, 16) },
+    { ORDATA (X, fb_x, 10) },
+    { ORDATA (CTL, fb_ctl, 16) },
+    { ORDATA (SADDR, fb_saddr, 4) },
+    { ORDATA (TEXTPTR, fb_textptr, 16) },
+    { ORDATA (CHARPTR, fb_charptr, 16) },
+    { ORDATA (TCTL, fb_tctl, 16) },
+    { ORDATA (TADDR, fb_taddr, 2) },
+    { DRDATA (COLS, fb_cols, 11), PV_LEFT + REG_RO },
+    { DRDATA (ROWS, fb_rows, 11), PV_LEFT + REG_RO },
+    { BRDATA (SPTR, fb_spr_ptr, 8, 16, FB_NSPRITE) },
+    { BRDATA (SX, fb_spr_x, 10, 32, FB_NSPRITE) },
+    { BRDATA (SY, fb_spr_y, 10, 32, FB_NSPRITE) },
+    { BRDATA (SCTL, fb_spr_ctl, 8, 16, FB_NSPRITE) },
+    { DRDATA (WIDTH, fb_wid, 11), PV_LEFT },
+    { DRDATA (HEIGHT, fb_hgt, 11), PV_LEFT },
+    { DRDATA (FRAME, fb_frame, 31), PV_LEFT + REG_RO },
+    { DRDATA (WRITES, fb_writes, 31), PV_LEFT + REG_RO },
+    { DRDATA (CLIPPED, fb_clipped, 31), PV_LEFT + REG_RO },
+    { FLDATA (BUSY, dev_busy, INT_V_FB) },
+    { FLDATA (DONE, dev_done, INT_V_FB) },
+    { FLDATA (DISABLE, dev_disable, INT_V_FB) },
+    { FLDATA (INT, int_req, INT_V_FB) },
+    { NULL }
+    };
+
+MTAB fb_mod[] = {
+    { MTAB_XTD|MTAB_VDV|MTAB_VALR|MTAB_NC, 0, "PREFIX", "PREFIX",
+      &fb_set_prefix, &fb_show_prefix, NULL, "PNG output path prefix" },
+    { MTAB_XTD|MTAB_VDV|MTAB_VALR|MTAB_NC, 0, "LIVE", "LIVE",
+      &fb_set_live, &fb_show_live, NULL, "live view shared memory path" },
+    { MTAB_XTD|MTAB_VDV|MTAB_VALR, 0, "WIDTH", "WIDTH",
+      &fb_set_dim, &fb_show_dim, NULL, "frame width in pixels" },
+    { MTAB_XTD|MTAB_VDV|MTAB_VALR, 1, "HEIGHT", "HEIGHT",
+      &fb_set_dim, &fb_show_dim, NULL, "frame height in pixels" },
+    { 0 }
+    };
+
+DEVICE fb_dev = {
+    "FB", &fb_unit, fb_reg, fb_mod,
+    1, 8, 16, 1, 8, 16,
+    NULL, NULL, &fb_reset,
+    NULL, NULL, NULL,
+    &fb_dib, DEV_DISABLE
+    };
+
+/* Effective word address of the current latch, honouring 8 bit bank select */
+
+static int32 fb_eaddr (void)
+{
+if (fb_ctl & FBC_M_BUS8)
+    return (((fb_ctl & FBC_M_BANK) ? 0100000 : 0) | (fb_addr >> 1))
+        & (FB_WORDS - 1);
+return fb_addr & (FB_WORDS - 1);
+}
+
+/* Pixel op: the card does the read-modify-write, so the CPU needs neither a
+   shadow buffer nor a read-back.  Off-screen coordinates are clipped. */
+
+static void fb_pixel (int32 x, int32 y, int32 op)
+{
+int32 word, bit, stride;
+uint16 mask;
+
+if ((x >= fb_wid) || (y >= fb_hgt)) {                   /* clip in hardware */
+    fb_clipped = fb_clipped + 1;
+    return;
+    }
+stride = fb_wid / 16;
+word = ((y * stride) + (x >> 4)) & (FB_WORDS - 1);
+bit = 15 - (x & 017);                                   /* bit 15 = leftmost */
+mask = (uint16) (1u << bit);
+switch (op) {
+  case FBP_OP_SET:
+    fb_back[word] = fb_back[word] | mask;
+    break;
+  case FBP_OP_CLEAR:
+    fb_back[word] = fb_back[word] & ((uint16) ~mask);
+    break;
+  case FBP_OP_XOR:
+    fb_back[word] = fb_back[word] ^ mask;
+    break;
+  default:                                              /* reserved, ignored */
+    break;
+    }
+}
+
+/* Sprite register write.  Sprite address is (unit << 2) | register, so the
+   four units occupy addresses 0..15 and the port auto-increments, letting a
+   driver load one sprite with DOA + 4x DOB, or all four with DOA + 16x DOB.
+   X and Y are signed so a sprite can hang off the left or top edge. */
+
+static void fb_swrite (int32 sa, int32 val)
+{
+int32 s = (sa >> 2) & (FB_NSPRITE - 1);
+int32 v = val & 0177777;
+
+switch (sa & 03) {
+  case FBS_R_PTR:
+    fb_spr_ptr[s] = v;
+    break;
+  case FBS_R_X:
+    fb_spr_x[s] = (v & 0100000) ? (v - 0200000) : v;    /* sign extend */
+    break;
+  case FBS_R_Y:
+    fb_spr_y[s] = (v & 0100000) ? (v - 0200000) : v;
+    break;
+  case FBS_R_CTL:
+    fb_spr_ctl[s] = v;
+    break;
+    }
+}
+
+/* Composite the sprites onto the front buffer at "scanout" time.  Sprites are
+   an OVERLAY: they are never written into display memory, so moving one costs
+   two register writes and never damages the background -- no save/restore.
+
+   VIC-II style: sprite data is 1 bit per pixel fetched through a pointer into
+   the card's own display memory.  A 0 bit is TRANSPARENT, so no mask plane is
+   needed.  What a set bit does is chosen per sprite by the CTL op field:
+   SET (solid), CLEAR (knockout), or XOR (visible over any background).
+
+   Unit 0 has the highest priority, so units are drawn in reverse order. */
+
+/* Text register port write.  Symmetric with fb_swrite: DOA selects a register,
+   DOB writes it and auto-increments, so loading all three is one DOA and three
+   DOBs. */
+
+static void fb_twrite (int32 ta, int32 val)
+{
+int32 v = val & 0177777;
+
+switch (ta & (FBT_NREG - 1)) {
+  case FBT_R_TEXTPTR:
+    fb_textptr = v;
+    break;
+  case FBT_R_CHARPTR:
+    fb_charptr = v;
+    break;
+  case FBT_R_CTL:
+    fb_tctl = v;
+    break;
+  default:                                              /* reg 3 reserved */
+    break;
+    }
+}
+
+/* Character cell width: nine dots in DOS text mode, eight otherwise. */
+
+static int32 fb_cellw (void)
+{
+return (fb_tctl & FBT_M_CELL9) ? (FB_CHAR_W + 1) : FB_CHAR_W;
+}
+
+/* Generate the whole frame from the text buffer.
+
+   Char mode REPLACES the bitmap rather than compositing over it, which is what
+   a VGA text mode does: the visible frame is a function of the text buffer and
+   the font, and the pixel/word write paths are simply not what is on screen.
+   Sprites still overlay afterwards, so a text cursor is an XOR sprite -- the
+   unit that already exists -- rather than a second cursor mechanism here.
+
+   A cell is one word: code in bits 7-0, REVERSE in bit 8, UNDERLINE in bit 9.
+   Glyphs come from CHARPTR in display memory, or from the built-in ROM when
+   CHARPTR is 0, so a program prints without shipping a font and overloads the
+   font with one register write. */
+
+static void fb_text_render (void)
+{
+int32 cellw, col, row, scan, x, y, stride, word, bit, c, i;
+int32 code, cell, glyph, bits, ninth;
+uint16 m;
+
+cellw = fb_cellw ();
+stride = fb_wid / 16;
+fb_cols = fb_wid / cellw;
+fb_rows = fb_hgt / FB_CHAR_H;
+
+for (i = 0; i < (stride * fb_hgt); i++)                 /* text owns the frame */
+    fb_front[i & (FB_WORDS - 1)] = 0;
+
+for (row = 0; row < fb_rows; row++) {
+    for (col = 0; col < fb_cols; col++) {
+        cell = fb_back[(fb_textptr + (row * fb_cols) + col) & (FB_WORDS - 1)];
+        code = cell & FBT_M_CODE;
+
+        for (scan = 0; scan < FB_CHAR_H; scan++) {
+            if (fb_charptr != 0)                        /* user font in RAM */
+                glyph = fb_back[(fb_charptr + (code * FB_CHAR_H) + scan)
+                                & (FB_WORDS - 1)];
+            else                                        /* built-in ROM */
+                glyph = fb_charrom[(code * FB_CHAR_H) + scan];
+            bits = (glyph >> 8) & 0377;                 /* bit 15 = leftmost */
+
+            /* VGA generates the 9th column rather than storing it: blank,
+               except across the line-drawing range where column 8 repeats so
+               box characters meet. */
+            ninth = 0;
+            if (cellw > FB_CHAR_W) {
+                if ((fb_tctl & FBT_M_LINEGFX) &&
+                    (code >= FBT_LG_FIRST) && (code <= FBT_LG_LAST))
+                    ninth = bits & 1;
+                }
+
+            if ((cell & FBT_M_ULINE) && (scan == FBT_ULINE_ROW)) {
+                bits = 0377;
+                ninth = 1;
+                }
+            if (cell & FBT_M_REVERSE) {                 /* swap ink and paper */
+                bits = (~bits) & 0377;
+                ninth = !ninth;
+                }
+
+            y = (row * FB_CHAR_H) + scan;
+            if (y >= fb_hgt)
+                continue;
+            for (c = 0; c < cellw; c++) {
+                if (c < FB_CHAR_W) {
+                    if (!((bits >> (7 - c)) & 1))
+                        continue;
+                    }
+                else if (!ninth)
+                    continue;
+                x = (col * cellw) + c;
+                if (x >= fb_wid)
+                    continue;
+                word = ((y * stride) + (x >> 4)) & (FB_WORDS - 1);
+                bit = 15 - (x & 017);
+                m = (uint16) (1u << bit);
+                fb_front[word] = fb_front[word] | m;
+                }
+            }
+        }
+    }
+}
+
+static void fb_composite (void)
+{
+int32 s, row, col, x, y, stride, word, bit, op;
+uint16 d, m;
+
+stride = fb_wid / 16;
+for (s = FB_NSPRITE - 1; s >= 0; s--) {
+    if (!(fb_spr_ctl[s] & FBS_M_ENABLE))
+        continue;
+    op = (fb_spr_ctl[s] >> FBS_V_OP) & FBS_M_OP;
+    for (row = 0; row < FB_SPR_DIM; row++) {
+        y = fb_spr_y[s] + row;
+        if ((y < 0) || (y >= fb_hgt))                   /* clip top/bottom */
+            continue;
+        d = fb_front[(fb_spr_ptr[s] + row) & (FB_WORDS - 1)];
+        if (d == 0)                                     /* fully transparent */
+            continue;
+        for (col = 0; col < FB_SPR_DIM; col++) {
+            if (!((d >> (15 - col)) & 1))               /* 0 bit = transparent */
+                continue;
+            x = fb_spr_x[s] + col;
+            if ((x < 0) || (x >= fb_wid))               /* clip left/right */
+                continue;
+            word = ((y * stride) + (x >> 4)) & (FB_WORDS - 1);
+            bit = 15 - (x & 017);
+            m = (uint16) (1u << bit);
+            switch (op) {
+              case FBP_OP_SET:
+                fb_front[word] = fb_front[word] | m;
+                break;
+              case FBP_OP_CLEAR:
+                fb_front[word] = fb_front[word] & ((uint16) ~m);
+                break;
+              case FBP_OP_XOR:
+                fb_front[word] = fb_front[word] ^ m;
+                break;
+              default:
+                break;
+                }
+            }
+        }
+    }
+}
+
+/* IOT routine.  The card unconditionally accepts writes: Busy is never set,
+   Done is never set, and no interrupt is ever requested. */
+
+int32 fb (int32 pulse, int32 code, int32 AC)
+{
+int32 ea;
+
+switch (code) {                                         /* decode IR<5:7> */
+
+  case ioDOA:
+    if (fb_ctl & FBC_M_SPRITE)                          /* sprite reg addr */
+        fb_saddr = AC & ((FB_NSPRITE * FB_SPR_STRIDE) - 1);
+    else if (fb_ctl & FBC_M_TEXT)                       /* text reg addr */
+        fb_taddr = AC & (FBT_NREG - 1);
+    else if (fb_ctl & FBC_M_PIXEL)                      /* pixel mode: X */
+        fb_x = AC & FBP_M_COORD;
+    else                                                /* word mode: addr */
+        fb_addr = AC & 0177777;
+    break;
+
+  case ioDOB:
+    if (fb_ctl & FBC_M_SPRITE) {                        /* sprite reg write */
+        fb_swrite (fb_saddr, AC);
+        fb_saddr = (fb_saddr + 1) & ((FB_NSPRITE * FB_SPR_STRIDE) - 1);
+        fb_writes = fb_writes + 1;
+        break;
+        }
+    if (fb_ctl & FBC_M_TEXT) {                          /* text reg write */
+        fb_twrite (fb_taddr, AC);
+        fb_taddr = (fb_taddr + 1) & (FBT_NREG - 1);
+        fb_writes = fb_writes + 1;
+        break;
+        }
+    if (fb_ctl & FBC_M_PIXEL)                           /* pixel mode: Y+op */
+        fb_pixel (fb_x, AC & FBP_M_COORD, (AC >> FBP_V_OP) & FBP_M_OP);
+    else if (fb_ctl & FBC_M_BUS8) {                     /* 8 bit bus mode */
+        ea = fb_eaddr ();
+        if (fb_addr & 1)                                /* odd byte = low */
+            fb_back[ea] = (fb_back[ea] & 0177400) | (AC & 0377);
+        else
+            fb_back[ea] = (fb_back[ea] & 0377) | ((AC & 0377) << 8);
+        }
+    else                                                /* 16 bit bus mode */
+        fb_back[fb_addr] = AC & 0177777;
+    if ((fb_ctl & (FBC_M_PIXEL | FBC_M_AUTOINC)) == FBC_M_AUTOINC)
+        fb_addr = (fb_addr + 1) & 0177777;              /* auto-increment */
+    fb_writes = fb_writes + 1;
+    break;
+
+  case ioDOC:                                           /* load control reg */
+    fb_ctl = AC & 0177777;
+    break;
+
+  case ioDIA:                                           /* read addr / X / sa */
+    if (fb_ctl & FBC_M_SPRITE)
+        return fb_saddr;
+    if (fb_ctl & FBC_M_TEXT)
+        return fb_taddr;
+    return (fb_ctl & FBC_M_PIXEL) ? fb_x : fb_addr;
+
+  case ioDIB:                                           /* read control reg */
+    return fb_ctl;
+
+  case ioDIC:                                           /* read back memory */
+    return fb_back[fb_eaddr ()];
+    }                                                   /* end switch code */
+
+if (pulse == iopP)                                      /* pulse P = present */
+    fb_present ();
+
+/* Never busy, never done, never interrupts.  Done must stay clear:
+   DEV_UPDATE_INTR derives int_req straight from dev_done, and dev_disable is
+   recomputed from the priority mask on every MSKO, so a device cannot durably
+   opt out of interrupts.  A held Done here would interrupt forever under ION. */
+
+DEV_CLR_BUSY( INT_FB ) ;
+DEV_CLR_DONE( INT_FB ) ;
+DEV_UPDATE_INTR ;
+return 0;
+}
+
+/* Publish the front buffer to the live view sink, if one is mapped.
+
+   Mono is stored exactly as the PNG and PBM rasters store it: bit 15 of a
+   word is the leftmost pixel, so the high byte of each word precedes the low
+   byte and a row is WIDTH/8 bytes.  A viewer that can unpack the PNG rows can
+   unpack this with the same code. */
+
+static void fb_live_publish (void)
+{
+#if defined (FB_HAVE_LIVE)
+int32 row, col, stride, rowbytes;
+uint8 *dst;
+
+if (fb_live == NULL)                                    /* no viewer sink */
+    return;
+stride = fb_wid / 16;                                   /* words per row */
+rowbytes = fb_wid / 8;
+
+fb_live[FBL_SEQ] = fb_live[FBL_SEQ] + 1;                /* odd: writing */
+__sync_synchronize ();
+
+fb_live[FBL_FORMAT] = FB_FMT_MONO1;
+fb_live[FBL_WIDTH] = (uint32) fb_wid;
+fb_live[FBL_HEIGHT] = (uint32) fb_hgt;
+fb_live[FBL_STRIDE] = (uint32) rowbytes;
+fb_live[FBL_BYTES] = (uint32) (rowbytes * fb_hgt);
+fb_live[FBL_FRAME] = (uint32) fb_frame;
+
+dst = fb_live_pix;
+for (row = 0; row < fb_hgt; row++) {
+    for (col = 0; col < stride; col++) {
+        uint16 w = fb_front[(row * stride + col) & (FB_WORDS - 1)];
+        *dst++ = (uint8) ((w >> 8) & 0377);             /* bit 15 leftmost */
+        *dst++ = (uint8) (w & 0377);
+        }
+    }
+
+__sync_synchronize ();
+fb_live[FBL_SEQ] = fb_live[FBL_SEQ] + 1;                /* even: frame whole */
+#endif
+}
+
+/* Present: swap buffers and dump the new front buffer as a 1 bit PNG. */
+
+static void fb_present (void)
+{
+size_t i;
+char fname[CBUFSIZE + 32];
+int32 row, col, stride;
+FILE *fp;
+#if defined (HAVE_LIBPNG)
+png_structp png;
+png_infop info;
+png_bytep rowbuf;
+#endif
+
+if (fb_tctl & FBT_M_ENABLE)                             /* char mode: generate */
+    fb_text_render ();
+else for (i = 0; i < FB_WORDS; i++)                     /* bitmap mode: swap */
+    fb_front[i] = fb_back[i];
+fb_composite ();                                        /* sprite overlay */
+fb_frame = fb_frame + 1;
+fb_writes = 0;
+fb_live_publish ();                                     /* before the early out */
+
+if (fb_prefix[0] == '\0')                               /* no PNG wanted */
+    return;
+stride = fb_wid / 16;                                   /* words per row */
+
+#if defined (HAVE_LIBPNG)
+sprintf (fname, "%s%04d.png", fb_prefix, fb_frame);
+if ((fp = fopen (fname, "wb")) == NULL)
+    return;
+png = png_create_write_struct (PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+if (png == NULL) {
+    fclose (fp);
+    return;
+    }
+info = png_create_info_struct (png);
+if ((info == NULL) || setjmp (png_jmpbuf (png))) {
+    png_destroy_write_struct (&png, info ? &info : NULL);
+    fclose (fp);
+    return;
+    }
+png_init_io (png, fp);
+png_set_IHDR (png, info, fb_wid, fb_hgt, 1, PNG_COLOR_TYPE_GRAY,
+    PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+png_write_info (png, info);
+rowbuf = (png_bytep) malloc (fb_wid / 8);
+if (rowbuf == NULL) {
+    png_destroy_write_struct (&png, &info);
+    fclose (fp);
+    return;
+    }
+for (row = 0; row < fb_hgt; row++) {
+    for (col = 0; col < stride; col++) {
+        uint16 w = fb_front[(row * stride + col) & (FB_WORDS - 1)];
+        rowbuf[col * 2] = (png_byte) ((w >> 8) & 0377); /* bit 15 = leftmost */
+        rowbuf[col * 2 + 1] = (png_byte) (w & 0377);
+        }
+    png_write_row (png, rowbuf);
+    }
+png_write_end (png, NULL);
+free (rowbuf);
+png_destroy_write_struct (&png, &info);
+fclose (fp);
+#else
+sprintf (fname, "%s%04d.pbm", fb_prefix, fb_frame);     /* fallback: PBM */
+if ((fp = fopen (fname, "wb")) == NULL)
+    return;
+fprintf (fp, "P4\n%d %d\n", fb_wid, fb_hgt);
+for (row = 0; row < fb_hgt; row++) {
+    for (col = 0; col < stride; col++) {
+        uint16 w = fb_front[(row * stride + col) & (FB_WORDS - 1)];
+        fputc ((w >> 8) & 0377, fp);
+        fputc (w & 0377, fp);
+        }
+    }
+fclose (fp);
+#endif
+}
+
+/* Reset */
+
+t_stat fb_reset (DEVICE *dptr)
+{
+size_t i;
+int32 s;
+
+for (i = 0; i < FB_WORDS; i++)
+    fb_back[i] = fb_front[i] = 0;
+for (s = 0; s < FB_NSPRITE; s++)
+    fb_spr_ptr[s] = fb_spr_x[s] = fb_spr_y[s] = fb_spr_ctl[s] = 0;
+fb_saddr = 0;
+fb_textptr = 0;                                         /* bitmap mode, ROM font */
+fb_charptr = 0;
+fb_tctl = 0;
+fb_taddr = 0;
+fb_cols = 0;
+fb_rows = 0;
+fb_addr = 0;
+fb_x = 0;
+fb_ctl = 0;                                             /* AUTOINC off */
+fb_frame = 0;
+fb_writes = 0;
+fb_clipped = 0;
+fb_live_publish ();                                     /* blank any viewer */
+DEV_CLR_BUSY( INT_FB ) ;
+DEV_CLR_DONE( INT_FB ) ;
+DEV_UPDATE_INTR ;
+return SCPE_OK;
+}
+
+/* SET FB PREFIX=<path> */
+
+t_stat fb_set_prefix (UNIT *uptr, int32 val, CONST char *cptr, void *desc)
+{
+if ((cptr == NULL) || (*cptr == '\0'))
+    return SCPE_ARG;
+strncpy (fb_prefix, cptr, CBUFSIZE - 1);
+fb_prefix[CBUFSIZE - 1] = '\0';
+return SCPE_OK;
+}
+
+t_stat fb_show_prefix (FILE *st, UNIT *uptr, int32 val, CONST void *desc)
+{
+fprintf (st, "prefix=%s", fb_prefix[0] ? fb_prefix : "(none, no dump)");
+return SCPE_OK;
+}
+
+/* SET FB LIVE=<path> -- create/attach the shared memory a viewer reads.
+
+   The file is created at its full fixed size and a header is published at
+   once, before any program has run, so a viewer started first shows a black
+   screen of the right size rather than failing to attach. */
+
+t_stat fb_set_live (UNIT *uptr, int32 val, CONST char *cptr, void *desc)
+{
+#if defined (FB_HAVE_LIVE)
+int fd;
+void *base;
+
+if ((cptr == NULL) || (*cptr == '\0'))
+    return SCPE_ARG;
+if (fb_live != NULL) {                                  /* re-point: drop old */
+    munmap ((void *) fb_live, FB_LIVE_SIZE);
+    fb_live = NULL;
+    fb_live_pix = NULL;
+    }
+if ((fd = open (cptr, O_RDWR | O_CREAT, 0666)) < 0)
+    return sim_messagef (SCPE_OPENERR, "FB: cannot open live sink %s\n", cptr);
+if (ftruncate (fd, (off_t) FB_LIVE_SIZE) < 0) {
+    close (fd);
+    return sim_messagef (SCPE_OPENERR, "FB: cannot size live sink %s\n", cptr);
+    }
+base = mmap (NULL, FB_LIVE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+close (fd);                                             /* mapping keeps it */
+if (base == MAP_FAILED)
+    return sim_messagef (SCPE_OPENERR, "FB: cannot map live sink %s\n", cptr);
+
+fb_live = (uint32 *) base;
+fb_live_pix = ((uint8 *) base) + FB_LIVE_HDR;
+
+/* CONTINUE an existing sink's sequence rather than restarting it.  A viewer
+   watching one sink across successive simulator runs is the normal case (a
+   testlist runs three demos through one window), and a restarted counter makes
+   a genuinely new frame indistinguishable from the previous run's last one
+   whenever the (SEQ, FRAME) pair repeats -- which it does immediately, since
+   every run presents its first frame at the same counts.  Zero it only when
+   the file is new or was written by something else, and step a stale odd
+   value, which means the last writer died mid-copy. */
+if ((fb_live[FBL_MAGIC] != FB_LIVE_MAGIC) ||
+    (fb_live[FBL_VERSION] != FB_LIVE_VERSION))
+    fb_live[FBL_SEQ] = 0;
+else if (fb_live[FBL_SEQ] & 1)
+    fb_live[FBL_SEQ] = fb_live[FBL_SEQ] + 1;
+
+fb_live[FBL_MAGIC] = FB_LIVE_MAGIC;
+fb_live[FBL_VERSION] = FB_LIVE_VERSION;
+strncpy (fb_live_path, cptr, CBUFSIZE - 1);
+fb_live_path[CBUFSIZE - 1] = '\0';
+fb_live_publish ();                                     /* geometry + blank */
+return SCPE_OK;
+#else
+return sim_messagef (SCPE_NOFNC, "FB: live view needs mmap\n");
+#endif
+}
+
+t_stat fb_show_live (FILE *st, UNIT *uptr, int32 val, CONST void *desc)
+{
+fprintf (st, "live=%s", fb_live_path[0] ? fb_live_path : "(none, no viewer)");
+return SCPE_OK;
+}
+
+/* SET FB WIDTH=<n> / HEIGHT=<n> */
+
+t_stat fb_set_dim (UNIT *uptr, int32 val, CONST char *cptr, void *desc)
+{
+t_stat r;
+int32 n;
+
+if ((cptr == NULL) || (*cptr == '\0'))
+    return SCPE_ARG;
+n = (int32) get_uint (cptr, 10, FB_MAXDIM, &r);
+if (r != SCPE_OK)
+    return SCPE_ARG;
+if (val == 0) {                                         /* WIDTH */
+    if ((n < 16) || (n % 16))                           /* must be word mult */
+        return SCPE_ARG;
+    if (((n / 16) * fb_hgt) > FB_WORDS)                 /* fits in 1Mbit? */
+        return SCPE_ARG;
+    fb_wid = n;
+    }
+else {                                                  /* HEIGHT */
+    if (n < 1)
+        return SCPE_ARG;
+    if (((fb_wid / 16) * n) > FB_WORDS)
+        return SCPE_ARG;
+    fb_hgt = n;
+    }
+return SCPE_OK;
+}
+
+t_stat fb_show_dim (FILE *st, UNIT *uptr, int32 val, CONST void *desc)
+{
+fprintf (st, "%s=%d", (val == 0) ? "width" : "height",
+    (val == 0) ? fb_wid : fb_hgt);
+return SCPE_OK;
+}
