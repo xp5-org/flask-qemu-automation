@@ -112,7 +112,7 @@ CONFIG = {
         },
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00120.c [portable, c89] -- struct {",
+            "description": "upstream c-testsuite tests/single-exec/00120.c [portable, c89] -- struct {{",
             "param": {
                 "name": "nova4",
                 "script_path": "{projbasedir}{projdir}/gen/ct00120.ini",

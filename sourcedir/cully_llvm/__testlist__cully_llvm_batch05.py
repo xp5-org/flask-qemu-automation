@@ -89,7 +89,7 @@ CONFIG = {
         },
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00046.c [portable, c11] -- typedef struct {",
+            "description": "upstream c-testsuite tests/single-exec/00046.c [portable, c11] -- typedef struct {{",
             "param": {
                 "name": "nova3",
                 "script_path": "{projbasedir}{projdir}/gen/ct00046.ini",
@@ -181,7 +181,7 @@ CONFIG = {
         },
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00050.c [portable, c11] -- struct S1 {",
+            "description": "upstream c-testsuite tests/single-exec/00050.c [portable, c11] -- struct S1 {{",
             "param": {
                 "name": "nova7",
                 "script_path": "{projbasedir}{projdir}/gen/ct00050.ini",

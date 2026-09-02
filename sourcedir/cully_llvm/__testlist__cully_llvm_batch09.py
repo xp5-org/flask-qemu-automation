@@ -158,7 +158,7 @@ CONFIG = {
         },
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00091.c [portable, c89] -- typedef struct {",
+            "description": "upstream c-testsuite tests/single-exec/00091.c [portable, c89] -- typedef struct {{",
             "param": {
                 "name": "nova6",
                 "script_path": "{projbasedir}{projdir}/gen/ct00091.ini",

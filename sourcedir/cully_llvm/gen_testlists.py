@@ -263,7 +263,7 @@ def gen_batches():
         text = HEADER_TEMPLATE.format(batch_num=batch_num)
         for n, base in enumerate(chunk, start=1):
             test_id = base[2:] if base.startswith("ct") else base
-            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"')
+            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"').replace('{', '{{').replace('}', '}}')
             text += STEP_TEMPLATE.format(n=n, base=base, test_id=test_id, start_desc=start_desc)
         text += FOOTER
         with open(out_path, "w") as f:
@@ -300,7 +300,7 @@ def gen_known_issues():
         text = KNOWN_ISSUES_HEADER_TEMPLATE.format(batch_num=batch_num)
         for n, (base, status) in enumerate(chunk, start=1):
             test_id = base[2:] if base.startswith("ct") else base
-            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"')
+            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"').replace('{', '{{').replace('}', '}}')
             expect = "print FAIL" if status == "FAIL" else "hang/timeout"
             text += KNOWN_ISSUE_STEP_TEMPLATE.format(
                 n=n, base=base, test_id=test_id, start_desc=start_desc,
@@ -390,9 +390,9 @@ def gen_broken_builds():
         out_path = os.path.join(HERE, f"__testlist__cully_llvm_brokenbuild{batch_num:02d}.py")
         text = BROKENBUILD_HEADER_TEMPLATE.format(batch_num=batch_num)
         for base in chunk:
-            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"')
+            start_desc = describe(base).replace('\\', '\\\\').replace('"', '\\"').replace('{', '{{').replace('}', '}}')
             error = build_errors.get(base, "see BUILD_STATUS.md")
-            error = error.replace('\\', '\\\\').replace('"', '\\"')
+            error = error.replace('\\', '\\\\').replace('"', '\\"').replace('{', '{{').replace('}', '}}')
             text += BROKENBUILD_STEP_TEMPLATE.format(
                 base=base, start_desc=start_desc, error=error)
         text += FOOTER

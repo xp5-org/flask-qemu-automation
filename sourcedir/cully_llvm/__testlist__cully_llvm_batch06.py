@@ -43,7 +43,7 @@ CONFIG = {
     "steps": [
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00054.c [portable, c89] -- enum E {",
+            "description": "upstream c-testsuite tests/single-exec/00054.c [portable, c89] -- enum E {{",
             "param": {
                 "name": "nova1",
                 "script_path": "{projbasedir}{projdir}/gen/ct00054.ini",
@@ -66,7 +66,7 @@ CONFIG = {
         },
         {
             "action": "test_startnovasimh",
-            "description": "upstream c-testsuite tests/single-exec/00055.c [portable, c89] -- enum E {",
+            "description": "upstream c-testsuite tests/single-exec/00055.c [portable, c89] -- enum E {{",
             "param": {
                 "name": "nova2",
                 "script_path": "{projbasedir}{projdir}/gen/ct00055.ini",
