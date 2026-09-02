@@ -31,15 +31,23 @@ why finishing PCC's known-issues backlog isn't a prerequisite here.
    (nova-llvm-backend is the one actually used; eclipse-llvm-backend is only
    needed if you want its own README's smoke tests / Eclipse-only path.)
 
-3. Clone llvm-project at the exact pinned commit and apply the patch
-   (nova-backend.patch is a superset of eclipse-llvm-backend's own
-   eclipse-backend.patch -- apply ONE of them, not both):
+3. Clone llvm-project at the exact pinned commit and apply the patch.
+   Use vendor/llvm-project-eclipse-local.patch, NOT the backend packages'
+   own nova-backend.patch / eclipse-backend.patch -- apply exactly ONE
+   patch, and that one. All three start from the same base commit and agree
+   on the nova/FeatureEIS parts, but the vendored one also carries the
+   backend fixes made after nova-llvm-backend e3a35fe was cut (nested
+   aggregate + float global initializers, no jump tables, the after-
+   legalize BRCOND combine, the i8 GEP fix, UDIV -> HALVE). Without them a
+   host builds an older backend that miscompiles this repo's Nova tests --
+   e.g. xp5_nova_fpgademo's cuberotate.c dies in dgasm with "Address out
+   of range. Got -138":
    ```
    mkdir _toolchain/llvm-project && cd _toolchain/llvm-project
    git init && git remote add origin https://github.com/llvm/llvm-project.git
    git fetch --depth 1 origin 8307b46d3ad5ace00c21e1fec6ef4ef4284290e9
    git checkout FETCH_HEAD
-   git apply ../nova-llvm-backend/nova-backend.patch
+   git apply ../../vendor/llvm-project-eclipse-local.patch
    ```
    (The shallow single-commit fetch works against github.com directly --
    no need for a full multi-GB clone first.)

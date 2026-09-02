@@ -23,6 +23,15 @@ fi
 stage_done() { [ -f "$TOOLCHAIN/.stage_$1" ]; }
 mark_stage() { touch "$TOOLCHAIN/.stage_$1"; }
 
+# Same as stage_done, but for a stage whose result depends on the contents of
+# an input file rather than only on a pinned commit: the marker holds that
+# file's sha256, so editing the file re-runs the stage instead of the plain
+# "marker exists -> skip" rule quietly keeping a toolchain built from the old
+# contents. Only llvm_checkout needs this (its patch lives in vendor/ and does
+# get updated); everything else is pinned by commit and can't drift.
+stage_done_for() { [ "$(cat "$TOOLCHAIN/.stage_$1" 2>/dev/null)" = "$2" ]; }
+mark_stage_for() { printf '%s\n' "$2" > "$TOOLCHAIN/.stage_$1"; }
+
 # dgasm is pinned the same way llvm-project already was -- fetched by exact
 # commit rather than a plain `git clone` of whatever HEAD happens to be.
 # Commits below are the combination verified to build a working nova-cc
@@ -64,8 +73,36 @@ if ! stage_done backend_clones; then
     mark_stage backend_clones
 fi
 
-if ! stage_done llvm_checkout; then
+# vendor/llvm-project-eclipse-local.patch, NOT the vendored backend tarball's
+# own nova-backend.patch: the two start from the same base commit and the
+# nova/FeatureEIS parts are identical, but the toolchain that actually
+# compiles this repo's Nova tests carries backend fixes made *after* that
+# tarball was cut, which nova-backend.patch does not contain --
+# flattenConstant (nested struct/array/union and float global initializers),
+# BR_JT/BRIND -> Expand (no jump tables: there is no pattern for either, and
+# both were defaulting to "Legal"), the after-legalize BRCOND combine, the i8
+# GEP double-halving fix, and UDIV -> EclipseISD::HALVE in LowerShift/
+# LowerSDIVREM. Those lived only as uncommitted edits in the (gitignored)
+# _toolchain/llvm-project checkout of the host they were made on, so any
+# other host bootstrapping from nova-backend.patch alone silently got a
+# *different, older* backend -- which is what made xp5_nova_fpgademo's
+# cuberotate.c fail there ("Address out of range. Got -138" out of dgasm)
+# while the same source compiled fine on the host that had them. This patch
+# is that host's exact tree state relative to the base commit below, so both
+# hosts now rebuild the same toolchain.
+LLVM_PATCH="$HERE/vendor/llvm-project-eclipse-local.patch"
+LLVM_PATCH_SHA="$(sha256sum "$LLVM_PATCH" | cut -d' ' -f1)"
+
+if ! stage_done_for llvm_checkout "$LLVM_PATCH_SHA"; then
     echo "--- fetching pinned llvm-project commit + applying patch ---"
+    # Clear the downstream markers BEFORE touching anything, not after: from
+    # here until the rebuild finishes, _toolchain/ is genuinely incomplete, and
+    # a marker left in place across a long checkout+build claims otherwise to
+    # anything that looks (a concurrent test run, an aborted resume, or someone
+    # polling for progress). A stale .bootstrap_complete surviving the whole
+    # llvm_checkout stage is exactly what made this host look finished seconds
+    # after the rebuild started.
+    rm -f "$TOOLCHAIN/.stage_llvm_build" "$TOOLCHAIN/.bootstrap_complete"
     rm -rf "$TOOLCHAIN/llvm-project"
     mkdir -p "$TOOLCHAIN/llvm-project"
     (
@@ -74,9 +111,9 @@ if ! stage_done llvm_checkout; then
         git remote add origin https://github.com/llvm/llvm-project.git
         git fetch --depth 1 origin 8307b46d3ad5ace00c21e1fec6ef4ef4284290e9
         git checkout FETCH_HEAD
-        git apply ../nova-llvm-backend/nova-backend.patch
+        git apply "$LLVM_PATCH"
     )
-    mark_stage llvm_checkout
+    mark_stage_for llvm_checkout "$LLVM_PATCH_SHA"
 fi
 
 if ! stage_done llvm_build; then

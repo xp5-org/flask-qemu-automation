@@ -27,6 +27,7 @@ CONFIG = {
         "Long-running (LLVM build); safe to re-run if aborted -- resumes "
         "from the last completed stage.",
     "projbasedir": "/testsrc/sourcedir/",
+    "batch_exclude": True,
     "structure": {
         "project": {
             "_rel": "{projdir}",
