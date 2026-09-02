@@ -13,12 +13,13 @@ CONFIG = {
     "projdir": "mac_m68k",
     "instance_name": "qemu1",
     "function": "build5",
-    "hdd1_qcow": "hdd.qcow2",
+    "hdd1_template": "system76demo.img",
+    "hdd1_overlay": "c_drive.qcow2",
     "projbasedir": "/testsrc/sourcedir/",
     "structure": {
         "project": {
             "_rel": "{projdir}",
-            "hdd_qcow_path": "{hdd1_qcow}",
+            "hdd1_overlay_path": "{hdd1_overlay}",
             "out_dir": {
                 "_rel": "output"
             }
@@ -29,7 +30,8 @@ CONFIG = {
             "action": "test_startqemu",
             "param": {
                 "cpuarch": "m68k",
-                "hdd1_qcow_path": "{projbasedir}{projdir}/{hdd1_qcow}",
+                "hdd1_qcow_path": "{projbasedir}{projdir}/{hdd1_overlay}",
+                "hdd1_template": "{hdd1_template}",
                 "name": "qemu1",
                 "port": 55555
             },
