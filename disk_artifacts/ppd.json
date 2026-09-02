@@ -1,0 +1,15 @@
+{
+  "name": "ppd",
+  "dest": "pacific",
+  "description": "Pacific C 8086 compiler install tree (PACC + BIN/INCLUDE/LIB/HELP/EXAMPLES) captured from pacific_c/hdd.qcow2 C:\\pacific",
+  "layout": "v2",
+  "boot": false,
+  "bootfiles": [
+    "CONFIG.SYS",
+    "AUTOEXEC.BAT"
+  ],
+  "captured_from": "hdd.qcow2",
+  "captured_dos_dir": "pacific",
+  "captured_at": "2026-09-02 04:27:13",
+  "file_count": 93
+}

@@ -10,17 +10,14 @@ from apphelpers import init_test_env
 
 # Pacific C TSR. Same batch-driven shape as pacific_c_bat: the build is one
 # BUILD.BAT invocation of the PACC command line driver, 8086 + small model.
-#
-# See __testlist__ppd_bat_buildtest.py in pacific_c_bat for the option
-# reference; the TSR-specific addition is -E<size>, which caps the heap the
-# EXE asks DOS for. Without it PACC stamps FFFFFH in the header, DOS hands the
-# program every free byte, and a TSR that keeps its whole block would leave
-# nothing behind to run.
+
 CONFIG = {
     "parent": "Pacific C TSR Counter",
     "projdir": "pacific_c_tsr",
     "instance_name": "qemu1",
     "function": "buildpac1",
+    "pacific_c_template": "dos622_pacific.img",
+    "hdd1_overlay": "c_drive.qcow2",
     "hdd1_img": "hdd.img",
     "hdd1_qcow": "hdd.qcow2",
     "floppy1_img": "newfloppy.img",
@@ -33,6 +30,7 @@ CONFIG = {
             "_rel": "{projdir}",
             "hdd_img_path": "{hdd1_img}",
             "hdd_qcow_path": "{hdd1_qcow}",
+            "hdd1_overlay_path": "{hdd1_overlay}",
             "floppy1_path": "{floppy1_img}",
             "config_path": "{config_file}",
             "out_dir": {"_rel": "output"},
@@ -40,6 +38,15 @@ CONFIG = {
         }
     },
     "steps": [
+        {
+            "action": "test_flatten_qcow_to_raw",
+            "param": {
+                "qcow_path": "{projbasedir}{projdir}/{hdd1_overlay}",
+                "raw_path": "{projbasedir}{projdir}/{hdd1_img}",
+                "hdd1_template": "{pacific_c_template}"
+            },
+            "subaction": ""
+        },
         {
             "action": "test_dirandfilesto_hddimg",
             "param": {

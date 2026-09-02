@@ -9,30 +9,13 @@ from apphelpers import init_test_env
 
 
 # Clone of pacific_c/__testlist__ppd_buildtest.py with the GUI removed.
-#
-# The original drove the PPD IDE: open the editor on BARTEST.C, OCR the HI-TECH
-# banner, F3 to compile, walk the modal dialogs with ret/ret/ret, OCR "success",
-# alt-f q to quit. Every one of those steps was an OCR/keystroke race.
-#
-# Here the whole build is C:\SRC\BUILD.BAT, driven by the PACC command line
-# driver, so the test is: boot -> run BUILD.BAT -> OCR one token -> run the EXE.
-# The compiler options that reproduce the IDE's defaults are:
-#
-#   8086 code   - the default. -1 / -2 / -7 would select 80186 / 80286 / 8087.
-#   small model - -Bs (also the default; stated explicitly so the testlist
-#                 documents the build params rather than relying on a default).
-#                 -Bs makes PACC link 86--dsc.lib + RT86--DS.OBJ; -Bl would
-#                 pick the large-model 86--dlc.lib + RT86--DL.OBJ instead.
-#   -O -Zg      - post-pass optimizer + code generator global optimization,
-#                 the same pair PACIFIC\EXAMPLES\MAKEALL.BAT ships with.
-#   -Q          - quiet (no signon banner); must be the first option.
-#
-# Option reference: C:\PACIFIC\HELP\DOS-0PAC.TBL on the hdd image (PACC -HELP).
 CONFIG = {
     "parent": "Pacific C Bartest (batch build)",
     "projdir": "pacific_c_bat",
     "instance_name": "qemu1",
     "function": "buildpac1",
+    "pacific_c_template": "dos622_pacific.img",
+    "hdd1_overlay": "c_drive.qcow2",
     "hdd1_img": "hdd.img",
     "hdd1_qcow": "hdd.qcow2",
     "floppy1_img": "newfloppy.img",
@@ -45,6 +28,7 @@ CONFIG = {
             "_rel": "{projdir}",
             "hdd_img_path": "{hdd1_img}",
             "hdd_qcow_path": "{hdd1_qcow}",
+            "hdd1_overlay_path": "{hdd1_overlay}",
             "floppy1_path": "{floppy1_img}",
             "config_path": "{config_file}",
             "out_dir": {"_rel": "output"},
@@ -52,6 +36,16 @@ CONFIG = {
         }
     },
     "steps": [
+        # Shared template -> scratch overlay -> flattened raw per-run C:.
+        {
+            "action": "test_flatten_qcow_to_raw",
+            "param": {
+                "qcow_path": "{projbasedir}{projdir}/{hdd1_overlay}",
+                "raw_path": "{projbasedir}{projdir}/{hdd1_img}",
+                "hdd1_template": "{pacific_c_template}"
+            },
+            "subaction": ""
+        },
         # src/ (BARTEST.C + BUILD.BAT) -> C:\SRC on the raw image, then convert
         # to the QCOW2 QEMU actually boots.
         {

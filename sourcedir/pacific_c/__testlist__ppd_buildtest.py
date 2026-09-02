@@ -8,11 +8,14 @@ if TESTSRC_HELPERDIR not in sys.path:
 from apphelpers import init_test_env
 
 
+# C: comes from the shared /testsrc/templates/dos622_pacific.img template
 CONFIG = {
     "parent": "Pacific C Bartest",
     "projdir": "pacific_c",
     "instance_name": "qemu1",
     "function": "buildpac1",
+    "pacific_c_template": "dos622_pacific.img",
+    "hdd1_overlay": "c_drive.qcow2",
     "hdd1_img": "hdd.img",
     "hdd1_qcow": "hdd.qcow2",
     "floppy1_img": "newfloppy.img",
@@ -25,6 +28,7 @@ CONFIG = {
             "_rel": "{projdir}",
             "hdd_img_path": "{hdd1_img}",
             "hdd_qcow_path": "{hdd1_qcow}",
+            "hdd1_overlay_path": "{hdd1_overlay}",
             "floppy1_path": "{floppy1_img}",
             "config_path": "{config_file}",
             "out_dir": {"_rel": "output"},
@@ -32,6 +36,15 @@ CONFIG = {
         }
     },
     "steps": [
+        {
+            "action": "test_flatten_qcow_to_raw",
+            "param": {
+                "qcow_path": "{projbasedir}{projdir}/{hdd1_overlay}",
+                "raw_path": "{projbasedir}{projdir}/{hdd1_img}",
+                "hdd1_template": "{pacific_c_template}"
+            },
+            "subaction": ""
+        },
         {
             "action": "test_dirandfilesto_hddimg",
             "param": {
